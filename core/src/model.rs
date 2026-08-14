@@ -49,8 +49,10 @@ fn default_true() -> bool {
 }
 
 /// 隧道形态 (对应 ssh -R / -L / -D)
+/// 注意: enum 的 `rename_all` 只改变体名, 变体内字段需 `rename_all_fields`
+/// (否则 target_host 落成 snake_case, 前端按 targetHost 读写会错位)。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", rename_all_fields = "camelCase")]
 pub enum TunnelKind {
     /// ssh -R: 服务器监听 bind:port →(经隧道)→ 本机 backend。
     /// port = 0 表示由服务器动态分配 (P4: 实际端口回填到隧道详情)
@@ -83,7 +85,7 @@ impl TunnelKind {
 
 /// 本地端后端: 反向隧道的流量落地处 (frp 插件思想的简化版)
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", rename_all_fields = "camelCase")]
 pub enum Backend {
     /// 落到固定本机地址, 如暴露本地 web: ("127.0.0.1", 3000)
     Tcp(String, u16),
