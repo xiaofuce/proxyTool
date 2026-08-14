@@ -17,6 +17,7 @@ use tokio::io::copy_bidirectional;
 use tokio::net::TcpListener;
 use tokio::sync::{Mutex, Notify};
 
+use crate::model::TunnelError;
 use crate::socks::{Connector, SocksServerHandle};
 use crate::ssh::{ConnectHandler, Logger};
 
@@ -89,7 +90,7 @@ pub async fn run_local_forward(
     target_host: String,
     target_port: u16,
     logger: Logger,
-) -> Result<(Arc<DirectSession>, tokio::task::JoinHandle<()>), String> {
+) -> Result<(Arc<DirectSession>, tokio::task::JoinHandle<()>), TunnelError> {
     let handle = Arc::new(Mutex::new(
         crate::ssh::connect_auth(
             &cfg.server_host,
@@ -106,10 +107,16 @@ pub async fn run_local_forward(
 
     let listener = TcpListener::bind((cfg.listen_host.as_str(), cfg.listen_port))
         .await
-        .map_err(|e| format!("绑定本机监听端口 {} 失败: {e}", cfg.listen_port))?;
+        .map_err(|e| TunnelError::PortInUse {
+            port: cfg.listen_port,
+            reason: e.to_string(),
+        })?;
     let actual_port = listener
         .local_addr()
-        .map_err(|e| format!("获取监听端口失败: {e}"))?
+        .map_err(|e| TunnelError::PortInUse {
+            port: cfg.listen_port,
+            reason: format!("获取监听端口失败: {e}"),
+        })?
         .port();
     (logger)(&format!(
         "本地转发: 本机监听 127.0.0.1:{actual_port} -> 经 SSH 隧道 -> {target_host}:{target_port}"
@@ -185,7 +192,7 @@ pub async fn run_local_forward(
 pub async fn run_dynamic_forward(
     cfg: DirectConfig,
     logger: Logger,
-) -> Result<(Arc<DirectSession>, tokio::task::JoinHandle<()>), String> {
+) -> Result<(Arc<DirectSession>, tokio::task::JoinHandle<()>), TunnelError> {
     let handle = Arc::new(Mutex::new(
         crate::ssh::connect_auth(
             &cfg.server_host,

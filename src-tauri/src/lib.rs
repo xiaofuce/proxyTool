@@ -11,7 +11,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use proxy_tool_core::{direct, probe, profiles, socks, ssh, tunnel, TunnelEvents};
+use proxy_tool_core::{
+    direct, model::TunnelError, probe, profiles, socks, ssh, tunnel, TunnelEvents,
+};
 use serde::Serialize;
 use tauri::Manager;
 use tokio::sync::Mutex;
@@ -136,7 +138,8 @@ async fn backoff_with_cancel(flag: &AtomicBool, dur: Duration) -> bool {
 /// 停止条件 (三者满足其一):
 /// - 用户断开意图 (`disconnect_intent`, 点「断开」按钮)
 /// - `auto_reconnect` 为 false (复选框关闭)
-/// - 认证被拒 (密码错误, 重连永远无法成功 —— 立即报错, 提示检查密码)
+/// - 致命错误 (`!e.retryable()`, P1 起类型化决策): 认证被拒 / 本机端口被占 /
+///   服务器拒绝转发 —— 重连无法解决, 立即报错不进退避 (autossh GATETIME 语义)
 ///
 /// `attempt` 闭包内自行管理会话槽 (连接成功时填入, 结束时清空) 并 emit "connected";
 /// 终态事件 (disconnected / error) 由本循环统一发射。
@@ -148,7 +151,7 @@ async fn run_with_reconnect<F, Fut>(
     mut attempt: F,
 ) where
     F: FnMut() -> Fut,
-    Fut: std::future::Future<Output = Result<(), String>>,
+    Fut: std::future::Future<Output = Result<(), TunnelError>>,
 {
     let mut backoff = Duration::from_secs(1);
     let mut n = 0u32;
@@ -162,15 +165,15 @@ async fn run_with_reconnect<F, Fut>(
         if let Err(e) = &result {
             events.log(kind, &format!("❌ {e}"));
         }
-        let auth_rejected = matches!(&result, Err(e) if ssh::is_auth_rejected(e));
-        if intent.load(Ordering::SeqCst) || !auto_reconnect || auth_rejected {
+        let fatal = matches!(&result, Err(e) if !e.retryable());
+        if intent.load(Ordering::SeqCst) || !auto_reconnect || fatal {
             match result {
                 Ok(()) => events.status(kind, "disconnected", None),
                 Err(e) => {
-                    let msg = if auth_rejected {
+                    let msg = if matches!(e, TunnelError::AuthRejected) {
                         format!("{e} —— 已停止自动重连, 请检查用户名/密码后重新连接")
                     } else {
-                        e
+                        e.to_string()
                     };
                     events.status(kind, "error", Some(&msg));
                 }
@@ -245,7 +248,9 @@ async fn resolve_local_proxy(app: &tauri::AppHandle, requested_port: u16) -> Res
         "remote",
         &format!("未发现 VPN 代理端口, 启动内置 SOCKS5 服务器 (127.0.0.1:{requested_port})"),
     );
-    let server = socks::start_socks_server(requested_port).await?;
+    let server = socks::start_socks_server(requested_port)
+        .await
+        .map_err(|e| e.to_string())?;
     let port = server.port;
     *guard = Some(server);
     Ok(port)

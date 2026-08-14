@@ -15,6 +15,8 @@ use tokio::io::{copy_bidirectional, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWr
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{Mutex, Notify};
 
+use crate::model::TunnelError;
+
 /// 桥接用的统一流类型 (TCP 连接或 SSH 通道)
 pub trait DynIo: AsyncRead + AsyncWrite + Unpin + Send {}
 impl<T: AsyncRead + AsyncWrite + Unpin + Send> DynIo for T {}
@@ -66,7 +68,7 @@ impl SocksServerHandle {
 }
 
 /// 在 127.0.0.1:<port> 启动 SOCKS5 服务器 (Plain 出口, 系统路由), 返回句柄
-pub async fn start_socks_server(port: u16) -> Result<Arc<SocksServerHandle>, String> {
+pub async fn start_socks_server(port: u16) -> Result<Arc<SocksServerHandle>, TunnelError> {
     start_socks_server_with(port, Connector::Plain).await
 }
 
@@ -74,14 +76,21 @@ pub async fn start_socks_server(port: u16) -> Result<Arc<SocksServerHandle>, Str
 pub async fn start_socks_server_with(
     port: u16,
     connector: Connector,
-) -> Result<Arc<SocksServerHandle>, String> {
-    let listener = TcpListener::bind(("127.0.0.1", port))
-        .await
-        .map_err(|e| format!("绑定内置 SOCKS 端口 {port} 失败: {e}"))?;
+) -> Result<Arc<SocksServerHandle>, TunnelError> {
+    let listener =
+        TcpListener::bind(("127.0.0.1", port))
+            .await
+            .map_err(|e| TunnelError::PortInUse {
+                port,
+                reason: format!("绑定内置 SOCKS 端口失败: {e}"),
+            })?;
 
     let bound = listener
         .local_addr()
-        .map_err(|e| format!("获取内置 SOCKS 端口失败: {e}"))?
+        .map_err(|e| TunnelError::PortInUse {
+            port,
+            reason: format!("获取内置 SOCKS 端口失败: {e}"),
+        })?
         .port();
 
     let stop = Arc::new(Notify::new());

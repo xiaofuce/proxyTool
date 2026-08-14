@@ -11,6 +11,8 @@ use std::time::Duration;
 
 use russh::client;
 
+use crate::model::TunnelError;
+
 /// 日志回调: GUI 中转发到前端, 测试中直接打印
 pub type Logger = Arc<dyn Fn(&str) + Send + Sync>;
 
@@ -33,6 +35,8 @@ impl client::Handler for ConnectHandler {
 }
 
 /// 连接服务器 + 密码认证, 返回会话句柄。密码仅用于内存认证, 不落盘。
+/// 错误为 TunnelError: Connect(网络)/AuthIo(认证阶段通信失败) 可重试,
+/// AuthRejected(密码被拒) 致命 —— 重连循环按 retryable() 决策。
 pub async fn connect_auth<H: client::Handler<Error = russh::Error> + Send + 'static>(
     server_host: &str,
     server_port: u16,
@@ -40,7 +44,7 @@ pub async fn connect_auth<H: client::Handler<Error = russh::Error> + Send + 'sta
     password: &str,
     handler: H,
     logger: &Logger,
-) -> Result<client::Handle<H>, String> {
+) -> Result<client::Handle<H>, TunnelError> {
     let mut config = client::Config::default();
     config.keepalive_interval = Some(Duration::from_secs(10));
     let config = Arc::new(config);
@@ -50,43 +54,24 @@ pub async fn connect_auth<H: client::Handler<Error = russh::Error> + Send + 'sta
 
     let mut session = client::connect(config, &addr[..], handler)
         .await
-        .map_err(|e| format!("SSH 连接失败: {e}"))?;
+        .map_err(|e| TunnelError::Connect {
+            addr: addr.clone(),
+            source: e,
+        })?;
     let auth = session
         .authenticate_password(username, password)
         .await
-        .map_err(|e| format!("认证失败: {e}"))?;
+        .map_err(|e| TunnelError::AuthIo { source: e })?;
     if !auth.success() {
-        return Err("密码认证被拒绝".into());
+        return Err(TunnelError::AuthRejected);
     }
     logger("SSH 认证成功");
     Ok(session)
 }
 
-/// 错误是否为「服务器明确拒绝密码」—— 重连无法解决, 重连循环应立即停止
-/// (见 lib.rs::run_with_reconnect)。
-/// 仅精确匹配 connect_auth 的 "密码认证被拒绝" (auth.success() == false);
-/// "认证失败: …" 可能是认证阶段的网络错误, 不匹配 (保持可重试, 宁可多试不误停)。
-/// tunnel.rs / direct.rs 对 connect_auth 的错误均原样透传, 故匹配可靠。
-pub fn is_auth_rejected(err: &str) -> bool {
-    err == "密码认证被拒绝"
-}
-
-#[cfg(test)]
-mod tests {
-    use super::is_auth_rejected;
-
-    #[test]
-    fn auth_rejection_is_classified() {
-        assert!(is_auth_rejected("密码认证被拒绝"));
-        // 网络/超时/端口等错误均应保持可重试
-        assert!(!is_auth_rejected("认证失败: channel closed"));
-        assert!(!is_auth_rejected("SSH 连接失败: Connection refused"));
-        assert!(!is_auth_rejected("绑定本机监听端口 1080 失败: Addr in use"));
-    }
-}
-
 /// 独立连接并在服务器上执行命令, 返回 stdout (含超时)。
 /// 与隧道连接分离: 验证 / 部署场景无需持有隧道句柄。
+/// 错误保持 String (展示型路径, 不参与重连决策); TunnelError 经 Display 转换。
 pub async fn remote_exec(
     server_host: &str,
     server_port: u16,
@@ -107,7 +92,8 @@ pub async fn remote_exec(
         },
         &silent,
     )
-    .await?;
+    .await
+    .map_err(|e| e.to_string())?;
     let chan = session
         .channel_open_session()
         .await

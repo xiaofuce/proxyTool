@@ -14,6 +14,7 @@
 
 pub mod creds;
 pub mod direct;
+pub mod model;
 pub mod probe;
 pub mod profiles;
 pub mod socks;

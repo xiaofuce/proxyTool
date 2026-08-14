@@ -28,6 +28,8 @@ use russh::Channel;
 use tokio::io::{copy_bidirectional, AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
+use crate::model::TunnelError;
+
 /// 隧道连接配置
 #[derive(Debug, Clone)]
 pub struct TunnelConfig {
@@ -155,7 +157,7 @@ impl client::Handler for TunnelHandler {
 async fn connect_and_auth(
     cfg: &TunnelConfig,
     logger: &Logger,
-) -> Result<(client::Handle<TunnelHandler>, Arc<AtomicBool>), String> {
+) -> Result<(client::Handle<TunnelHandler>, Arc<AtomicBool>), TunnelError> {
     let corrupted = Arc::new(AtomicBool::new(false));
     let handler = TunnelHandler {
         cfg: cfg.clone(),
@@ -179,7 +181,7 @@ async fn connect_and_auth(
 async fn try_tcpip_forward(
     cfg: &TunnelConfig,
     logger: &Logger,
-) -> Result<(client::Handle<TunnelHandler>, Arc<AtomicBool>), String> {
+) -> Result<(client::Handle<TunnelHandler>, Arc<AtomicBool>), TunnelError> {
     let (session, corrupted) = connect_and_auth(cfg, logger).await?;
     // bind_address 必须用 "localhost": OpenSSH 的 GatewayPorts 检查只放行
     // "localhost" 字面值 ("127.0.0.1"/"0.0.0.0" 会被拒绝或行为不稳定)。
@@ -187,7 +189,10 @@ async fn try_tcpip_forward(
     let actual_port = session
         .tcpip_forward("localhost", cfg.remote_port)
         .await
-        .map_err(|e| format!("请求反向端口转发失败: {e}"))?;
+        .map_err(|e| TunnelError::ForwardRejected {
+            port: cfg.remote_port,
+            reason: e.to_string(),
+        })?;
     (logger)(&format!(
         "服务器已监听 127.0.0.1:{actual_port} (转发到 127.0.0.1:{})",
         cfg.local_proxy_port
@@ -201,7 +206,10 @@ async fn try_tcpip_forward(
     let probe = session
         .channel_open_session()
         .await
-        .map_err(|e| format!("打开探测通道失败: {e}"))?;
+        .map_err(|e| TunnelError::ChannelOpen {
+            what: "探测通道".into(),
+            reason: e.to_string(),
+        })?;
     probe
         .exec(
             true,
@@ -211,7 +219,7 @@ async fn try_tcpip_forward(
             ),
         )
         .await
-        .map_err(|e| format!("执行探测命令失败: {e}"))?;
+        .map_err(|e| TunnelError::Protocol(format!("执行探测命令失败: {e}")))?;
     tokio::time::sleep(std::time::Duration::from_secs(2)).await;
     let mut probe_out = Vec::new();
     let mut stream = probe.into_stream();
@@ -223,7 +231,10 @@ async fn try_tcpip_forward(
     let out = String::from_utf8_lossy(&probe_out);
     (logger)(&format!("端口探测结果: {}", out.trim()));
     if !out.contains("PROBE_OK") {
-        return Err(format!("转发端口探测失败, 服务器输出: {}", out.trim()));
+        return Err(TunnelError::Protocol(format!(
+            "转发端口探测失败, 服务器输出: {}",
+            out.trim()
+        )));
     }
     Ok((session, corrupted))
 }
@@ -233,7 +244,7 @@ async fn try_tcpip_forward(
 pub async fn run_tunnel_session(
     cfg: TunnelConfig,
     logger: Logger,
-) -> Result<Arc<tokio::sync::Mutex<client::Handle<TunnelHandler>>>, String> {
+) -> Result<Arc<tokio::sync::Mutex<client::Handle<TunnelHandler>>>, TunnelError> {
     let (session, _) = connect_and_auth(&cfg, &logger).await?;
     (logger)(&format!(
         "兼容模式: 在服务器上启动 stdio 转发助手 (监听 127.0.0.1:{})",
@@ -871,7 +882,7 @@ pub async fn close_session(session: &TunnelSession) {
 
 /// 建立隧道会话并返回句柄。调用方负责保持句柄存活 (drop 即断开)。
 /// 自动选择模式: 标准转发通道被服务器端组件污染时切换到兼容模式。
-pub async fn run_tunnel(cfg: TunnelConfig, logger: Logger) -> Result<TunnelSession, String> {
+pub async fn run_tunnel(cfg: TunnelConfig, logger: Logger) -> Result<TunnelSession, TunnelError> {
     match try_tcpip_forward(&cfg, &logger).await {
         Ok((session, corrupted)) => {
             if corrupted.load(Ordering::Relaxed) {
@@ -886,6 +897,16 @@ pub async fn run_tunnel(cfg: TunnelConfig, logger: Logger) -> Result<TunnelSessi
             Ok((Arc::new(tokio::sync::Mutex::new(session)), corrupted))
         }
         Err(e) => {
+            // 连接/认证阶段的失败与转发模式无关, 直接透传 ——
+            // 兼容模式用的是同一条 SSH 连接, 重试必然同样失败 (错误密码不做无谓二次连接)。
+            if matches!(
+                e,
+                TunnelError::Connect { .. }
+                    | TunnelError::AuthIo { .. }
+                    | TunnelError::AuthRejected
+            ) {
+                return Err(e);
+            }
             (logger)(&format!("标准转发模式不可用 ({e}), 改用兼容模式"));
             Ok((
                 run_tunnel_session(cfg, logger).await?,
@@ -904,7 +925,7 @@ pub async fn start_tunnel(
     cfg: TunnelConfig,
     logger: Logger,
     on_status: Arc<dyn Fn(&str) + Send + Sync>,
-) -> Result<(), String> {
+) -> Result<(), TunnelError> {
     let (mut session, corrupted) = run_tunnel(cfg.clone(), logger.clone()).await?;
     let mut rebuilt = corrupted.load(Ordering::Relaxed); // 已在 run_tunnel 内切过兼容模式
 
