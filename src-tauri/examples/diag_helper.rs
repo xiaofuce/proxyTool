@@ -1,7 +1,7 @@
 //! 远程诊断: 1081 占用 + 手动运行 helper 观察输出
 //! 运行: cargo run --example diag_helper
-use std::sync::Arc;
 use russh::client;
+use std::sync::Arc;
 use tokio::io::AsyncReadExt;
 
 const SERVER: &str = "203.0.113.20";
@@ -69,9 +69,12 @@ while True:
     chan.exec(true, cmd.as_str()).await.unwrap();
     let mut stream = chan.into_stream();
     let mut out = Vec::new();
-    tokio::time::timeout(std::time::Duration::from_secs(30), stream.read_to_end(&mut out))
-        .await
-        .unwrap()
-        .unwrap();
+    tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        stream.read_to_end(&mut out),
+    )
+    .await
+    .unwrap()
+    .unwrap();
     println!("{}", String::from_utf8_lossy(&out));
 }

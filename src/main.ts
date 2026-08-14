@@ -49,6 +49,7 @@ const states: Record<Kind, { connected: boolean }> = {
 const STATUS_TEXT: Record<string, string> = {
   connecting: "连接中...",
   connected: "已连接",
+  reconnecting: "重连中...",
   disconnected: "已断开",
   error: "错误",
 };
@@ -63,13 +64,18 @@ function setStatus(kind: Kind, state: string, message?: string) {
 
   const connected = state === "connected";
   states[kind].connected = connected;
-  el<HTMLButtonElement>(`connect-${kind}`).disabled = connected || state === "connecting";
-  el<HTMLButtonElement>(`disconnect-${kind}`).disabled = !connected;
+  // 活跃态 (含连接中/重连中): 连接按钮禁用, 断开按钮启用 (便于取消重连)
+  const active = connected || state === "connecting" || state === "reconnecting";
+  el<HTMLButtonElement>(`connect-${kind}`).disabled = active;
+  el<HTMLButtonElement>(`disconnect-${kind}`).disabled = !active;
   if (kind === "remote") {
     el<HTMLButtonElement>("verify-remote").disabled = !connected;
     el<HTMLButtonElement>("deploy-remote").disabled = !connected;
   }
-  if (message) log(kind, `❌ ${message}`);
+  if (message) {
+    // error 的 message 是错误信息 (带 ❌); reconnecting 的 message 是进度提示
+    log(kind, state === "error" ? `❌ ${message}` : message);
+  }
 }
 
 // ---------- 后端事件 ----------
@@ -123,6 +129,7 @@ wireTunnelPage("remote", "connect_tunnel", () => ({
   password: el<HTMLInputElement>("password-remote").value,
   remotePort: Number(el<HTMLInputElement>("remote-port").value),
   localProxyPort: Number(el<HTMLInputElement>("local-proxy-port").value),
+  autoReconnect: el<HTMLInputElement>("autoreconnect-remote").checked,
 }));
 
 // 探测本机 SOCKS 代理端口
@@ -205,6 +212,7 @@ wireTunnelPage("local", "connect_local", () => ({
   listenPort: Number(el<HTMLInputElement>("listen-port-local").value),
   targetHost: el<HTMLInputElement>("target-host-local").value.trim(),
   targetPort: Number(el<HTMLInputElement>("target-port-local").value),
+  autoReconnect: el<HTMLInputElement>("autoreconnect-local").checked,
 }));
 
 // ---------- 动态隧道页 ----------
@@ -214,6 +222,7 @@ wireTunnelPage("dynamic", "connect_dynamic", () => ({
   username: el<HTMLInputElement>("username-dynamic").value.trim(),
   password: el<HTMLInputElement>("password-dynamic").value,
   listenPort: Number(el<HTMLInputElement>("listen-port-dynamic").value),
+  autoReconnect: el<HTMLInputElement>("autoreconnect-dynamic").checked,
 }));
 
 // ---------- 服务器配置档案 ----------

@@ -90,17 +90,19 @@ pub async fn run_local_forward(
     target_port: u16,
     logger: Logger,
 ) -> Result<(Arc<DirectSession>, tokio::task::JoinHandle<()>), String> {
-    let handle = Arc::new(Mutex::new(crate::ssh::connect_auth(
-        &cfg.server_host,
-        cfg.server_port,
-        &cfg.username,
-        &cfg.password,
-        ConnectHandler {
-            logger: logger.clone(),
-        },
-        &logger,
-    )
-    .await?));
+    let handle = Arc::new(Mutex::new(
+        crate::ssh::connect_auth(
+            &cfg.server_host,
+            cfg.server_port,
+            &cfg.username,
+            &cfg.password,
+            ConnectHandler {
+                logger: logger.clone(),
+            },
+            &logger,
+        )
+        .await?,
+    ));
 
     let listener = TcpListener::bind((cfg.listen_host.as_str(), cfg.listen_port))
         .await
@@ -184,17 +186,19 @@ pub async fn run_dynamic_forward(
     cfg: DirectConfig,
     logger: Logger,
 ) -> Result<(Arc<DirectSession>, tokio::task::JoinHandle<()>), String> {
-    let handle = Arc::new(Mutex::new(crate::ssh::connect_auth(
-        &cfg.server_host,
-        cfg.server_port,
-        &cfg.username,
-        &cfg.password,
-        ConnectHandler {
-            logger: logger.clone(),
-        },
-        &logger,
-    )
-    .await?));
+    let handle = Arc::new(Mutex::new(
+        crate::ssh::connect_auth(
+            &cfg.server_host,
+            cfg.server_port,
+            &cfg.username,
+            &cfg.password,
+            ConnectHandler {
+                logger: logger.clone(),
+            },
+            &logger,
+        )
+        .await?,
+    ));
 
     let connector = Connector::Ssh {
         handle: handle.clone(),

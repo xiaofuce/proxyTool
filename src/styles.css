@@ -129,6 +129,11 @@ body {
   animation: pulse 1.2s ease-in-out infinite;
 }
 
+.nav-dot.reconnecting {
+  background: #2563eb;
+  animation: pulse 1.2s ease-in-out infinite;
+}
+
 @keyframes pulse {
   0%, 100% { opacity: 1; }
   50% { opacity: 0.25; }
@@ -275,6 +280,9 @@ button.danger:hover:not(:disabled) {
 
 /* ---------- 状态徽章 ---------- */
 .status-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
   margin-bottom: 12px;
 }
 
@@ -300,6 +308,23 @@ button.danger:hover:not(:disabled) {
 .badge.error {
   color: var(--danger);
   border-color: var(--danger);
+}
+
+.badge.reconnecting {
+  color: #2563eb;
+  border-color: #2563eb;
+}
+
+.ar-label {
+  font-size: 13px;
+  color: var(--muted);
+  cursor: pointer;
+  user-select: none;
+}
+
+.ar-label input {
+  margin-right: 4px;
+  cursor: pointer;
 }
 
 .hint {

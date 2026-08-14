@@ -11,7 +11,7 @@
 
 use std::sync::Arc;
 
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, copy_bidirectional};
+use tokio::io::{copy_bidirectional, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{Mutex, Notify};
 
@@ -45,9 +45,7 @@ impl Connector {
                     .await
                     .channel_open_direct_tcpip(host, port as u32, "127.0.0.1", 0)
                     .await
-                    .map_err(|e| {
-                        std::io::Error::other(format!("SSH 直连通道打开失败: {e}"))
-                    })?;
+                    .map_err(|e| std::io::Error::other(format!("SSH 直连通道打开失败: {e}")))?;
                 Ok(Box::new(chan.into_stream()))
             }
         }

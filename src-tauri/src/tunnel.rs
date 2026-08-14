@@ -84,7 +84,10 @@ impl client::Handler for TunnelHandler {
         reply: ChannelOpenHandle,
         _session: &mut Session,
     ) -> Result<(), Self::Error> {
-        let target = format!("{}:{}", self.cfg.local_proxy_host, self.cfg.local_proxy_port);
+        let target = format!(
+            "{}:{}",
+            self.cfg.local_proxy_host, self.cfg.local_proxy_port
+        );
         let logger = self.logger.clone();
         let corrupted = self.corrupted.clone();
         // 与 russh 自身测试相同: 先在任务里 into_stream, handler 再 accept
@@ -96,35 +99,33 @@ impl client::Handler for TunnelHandler {
             // 首字节是其长度前缀的 0x00 — 据此识别并标记污染, 由上层切换兼容模式。
             // 其他首字节 (如探测命令写入的 0x58 'X') 是探测数据, 静默丢弃, 不算污染。
             let mut head = [0u8; 1];
-            let verdict = match tokio::time::timeout(
-                std::time::Duration::from_secs(2),
-                chan.read(&mut head),
-            )
-            .await
-            {
-                Ok(Ok(0)) | Ok(Err(_)) | Err(_) => {
-                    // 无数据: 探测连接或对端已断开, 静默关闭
-                    (logger)("转发通道无数据, 关闭");
-                    None
-                }
-                Ok(Ok(_)) if head[0] == 0x05 => Some(true), // SOCKS5 握手, 正常
-                Ok(Ok(_)) if head[0] == 0x00 => {
-                    // 首字节 0x00: 服务器端注入的审计数据 (长度前缀特征)
-                    (logger)(
-                        "检测到转发通道首字节 0x00, 疑似服务器端注入审计数据 (云主机安全组件)",
-                    );
-                    corrupted.store(true, Ordering::Relaxed);
-                    None
-                }
-                Ok(Ok(_)) => {
-                    // 其他首字节: 探测数据 (如 0x58 'X'), 静默丢弃
-                    (logger)(&format!(
-                        "转发通道首字节 0x{:02x} 非 SOCKS5 (探测数据?), 关闭",
-                        head[0]
-                    ));
-                    None
-                }
-            };
+            let verdict =
+                match tokio::time::timeout(std::time::Duration::from_secs(2), chan.read(&mut head))
+                    .await
+                {
+                    Ok(Ok(0)) | Ok(Err(_)) | Err(_) => {
+                        // 无数据: 探测连接或对端已断开, 静默关闭
+                        (logger)("转发通道无数据, 关闭");
+                        None
+                    }
+                    Ok(Ok(_)) if head[0] == 0x05 => Some(true), // SOCKS5 握手, 正常
+                    Ok(Ok(_)) if head[0] == 0x00 => {
+                        // 首字节 0x00: 服务器端注入的审计数据 (长度前缀特征)
+                        (logger)(
+                            "检测到转发通道首字节 0x00, 疑似服务器端注入审计数据 (云主机安全组件)",
+                        );
+                        corrupted.store(true, Ordering::Relaxed);
+                        None
+                    }
+                    Ok(Ok(_)) => {
+                        // 其他首字节: 探测数据 (如 0x58 'X'), 静默丢弃
+                        (logger)(&format!(
+                            "转发通道首字节 0x{:02x} 非 SOCKS5 (探测数据?), 关闭",
+                            head[0]
+                        ));
+                        None
+                    }
+                };
             if verdict.is_none() {
                 return;
             }
@@ -350,7 +351,8 @@ pub async fn run_tunnel_session(
                             let hex = |b: &[u8]| -> String {
                                 b.iter().map(|x| format!("{x:02x}")).collect::<String>()
                             };
-                            let head: String = buf.iter().take(24).map(|x| format!("{x:02x}")).collect();
+                            let head: String =
+                                buf.iter().take(24).map(|x| format!("{x:02x}")).collect();
                             let tail: String = buf
                                 .iter()
                                 .skip(buf.len().saturating_sub(16))
@@ -861,14 +863,22 @@ pub async fn run_tunnel(cfg: TunnelConfig, logger: Logger) -> Result<TunnelSessi
     match try_tcpip_forward(&cfg, &logger).await {
         Ok((session, corrupted)) => {
             if corrupted.load(Ordering::Relaxed) {
-                (logger)("检测到服务器转发通道被注入审计数据 (常见于云主机安全组件), 切换兼容模式...");
-                return Ok((run_tunnel_session(cfg, logger).await?, Arc::new(AtomicBool::new(false))));
+                (logger)(
+                    "检测到服务器转发通道被注入审计数据 (常见于云主机安全组件), 切换兼容模式...",
+                );
+                return Ok((
+                    run_tunnel_session(cfg, logger).await?,
+                    Arc::new(AtomicBool::new(false)),
+                ));
             }
             Ok((Arc::new(tokio::sync::Mutex::new(session)), corrupted))
         }
         Err(e) => {
             (logger)(&format!("标准转发模式不可用 ({e}), 改用兼容模式"));
-            Ok((run_tunnel_session(cfg, logger).await?, Arc::new(AtomicBool::new(false))))
+            Ok((
+                run_tunnel_session(cfg, logger).await?,
+                Arc::new(AtomicBool::new(false)),
+            ))
         }
     }
 }
@@ -928,6 +938,7 @@ pub async fn start_tunnel(
         }
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
     }
-    (on_status)("disconnected");
+    // 不在此 emit "disconnected": 终态由调用方 (lib.rs 重连循环) 统一控制,
+    // 否则会与重连循环的 disconnected/reconnecting 重复发射。
     Ok(())
 }

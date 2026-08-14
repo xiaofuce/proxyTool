@@ -18,7 +18,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use proxy_tool_lib::socks::start_socks_server;
-use proxy_tool_lib::tunnel::{run_tunnel, run_tunnel_session, TunnelConfig, Logger};
+use proxy_tool_lib::tunnel::{run_tunnel, run_tunnel_session, Logger, TunnelConfig};
 use russh::client;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -69,10 +69,7 @@ async fn connect_exec_handle() -> Arc<tokio::sync::Mutex<client::Handle<ExecHand
 }
 
 /// 在服务器上执行命令 (经独立连接), 返回 stdout (带 30s 超时)
-async fn exec(
-    handle: &Arc<tokio::sync::Mutex<client::Handle<ExecHandler>>>,
-    cmd: &str,
-) -> String {
+async fn exec(handle: &Arc<tokio::sync::Mutex<client::Handle<ExecHandler>>>, cmd: &str) -> String {
     let chan = handle
         .lock()
         .await
@@ -159,7 +156,9 @@ async fn verify_socks_local(port: u16) -> Result<String, String> {
 
 /// 本地 echo 服务器: 收到什么原样写回
 async fn start_echo_server() -> u16 {
-    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+        .await
+        .unwrap();
     let echo_port = listener.local_addr().unwrap().port();
     println!("== echo 服务器: 127.0.0.1:{echo_port}");
     tokio::spawn(async move {
@@ -290,7 +289,9 @@ async fn session_mode_passes_large_data() {
         local_proxy_port: echo_port,
     };
     let logger: Logger = Arc::new(|msg| println!("[tunnel] {msg}"));
-    let _tunnel = run_tunnel_session(cfg, logger).await.expect("兼容模式隧道建立失败");
+    let _tunnel = run_tunnel_session(cfg, logger)
+        .await
+        .expect("兼容模式隧道建立失败");
     let exec_h = connect_exec_handle().await;
 
     // 服务器上确认转发助手监听与进程
@@ -351,7 +352,9 @@ async fn session_mode_multi_conn() {
         local_proxy_port: echo_port,
     };
     let logger: Logger = Arc::new(|msg| println!("[tunnel] {msg}"));
-    let _tunnel = run_tunnel_session(cfg, logger).await.expect("兼容模式隧道建立失败");
+    let _tunnel = run_tunnel_session(cfg, logger)
+        .await
+        .expect("兼容模式隧道建立失败");
     let exec_h = connect_exec_handle().await;
 
     let cmd = "exec 2>&1
@@ -491,11 +494,7 @@ async fn server_can_reach_internet_through_tunnel() {
     let exec_h = connect_exec_handle().await;
 
     // 2.5 本机直接验证内置 SOCKS (不经隧道, 排除隧道因素) — 纯 Rust SOCKS5 客户端
-    let v = tokio::time::timeout(
-        Duration::from_secs(15),
-        verify_socks_local(local_port),
-    )
-    .await;
+    let v = tokio::time::timeout(Duration::from_secs(15), verify_socks_local(local_port)).await;
     println!("--- 本机经内置 SOCKS 访问 google (Rust 客户端): {v:?} ---");
 
     // 3. 服务器上确认 1081 正在监听
@@ -571,9 +570,7 @@ async fn disconnect_closes_session() {
         local_proxy_port: echo_port,
     };
     let logger: Logger = Arc::new(|msg| println!("[tunnel] {msg}"));
-    let (session, _corrupted) = run_tunnel(cfg, logger)
-        .await
-        .expect("隧道建立失败");
+    let (session, _corrupted) = run_tunnel(cfg, logger).await.expect("隧道建立失败");
 
     // 确认连接建立时 is_closed() = false
     assert!(
@@ -603,7 +600,10 @@ async fn disconnect_closes_session() {
     })
     .await
     .unwrap_or(false);
-    assert!(closed, "disconnect() 后 is_closed() 未在 15s 内变为 true (断开机制失效)");
+    assert!(
+        closed,
+        "disconnect() 后 is_closed() 未在 15s 内变为 true (断开机制失效)"
+    );
     println!("== 断开机制验证通过: DISCONNECT 后 is_closed = true");
 
     // 服务器侧确认 1083 监听已消失 (helper 随 SSH 连接关闭退出)

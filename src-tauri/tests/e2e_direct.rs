@@ -37,7 +37,9 @@ fn cfg(listen_port: u16) -> DirectConfig {
 
 /// 分配一个空闲的本地端口 (绑定后立即释放, 由被测代码接管绑定)
 async fn free_port() -> u16 {
-    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+        .await
+        .unwrap();
     let port = listener.local_addr().unwrap().port();
     drop(listener);
     port
@@ -64,14 +66,10 @@ async fn read_line(stream: &mut TcpStream) -> String {
 #[tokio::test]
 async fn local_forward_reaches_server_ssh() {
     let listen_port = free_port().await;
-    let (session, task) = run_local_forward(
-        cfg(listen_port),
-        "127.0.0.1".into(),
-        22,
-        silent_logger(),
-    )
-    .await
-    .expect("本地转发启动失败");
+    let (session, task) =
+        run_local_forward(cfg(listen_port), "127.0.0.1".into(), 22, silent_logger())
+            .await
+            .expect("本地转发启动失败");
 
     // 等待监听就绪
     tokio::time::sleep(Duration::from_millis(800)).await;
