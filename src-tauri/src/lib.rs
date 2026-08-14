@@ -10,6 +10,7 @@
 //! - 档案: `list_profiles/save_profile/delete_profile` + 分层默认值
 //!   `profile_defaults_get/profile_defaults_save`
 //! - 场景动作: `verify_remote_tunnel/deploy_wrapper` (vpn_share 预设附带)
+//! - 主机密钥: `known_hosts_list/known_hosts_forget` (TOFU 记忆, 服务器页)
 //! - 工具: `probe_local_proxy`
 //!
 //! 事件: `tunnel-status {id,kind,state,message?}` / `tunnel-log {id,kind,msg}`
@@ -321,6 +322,7 @@ async fn verify_remote_tunnel(
         &password,
         &cmd,
         std::time::Duration::from_secs(45),
+        state.registry.known_hosts(),
     )
     .await?;
     events_log(&app, &id, &format!("验证隧道:\n{out}"));
@@ -365,10 +367,57 @@ fi"#,
         &password,
         &cmd,
         std::time::Duration::from_secs(30),
+        state.registry.known_hosts(),
     )
     .await?;
     events_log(&app, &id, &format!("部署 proxy wrapper:\n{out}"));
     Ok(out)
+}
+
+// ---------- 主机密钥记忆 (TOFU; P6) ----------
+
+/// 已记住指纹的 DTO (服务器页展示)
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct KnownHostDto {
+    host: String,
+    port: u16,
+    algorithm: String,
+    fingerprint: String,
+}
+
+/// 命令: 已记住的服务器指纹列表
+#[tauri::command]
+fn known_hosts_list(state: tauri::State<'_, AppState>) -> Vec<KnownHostDto> {
+    state
+        .registry
+        .known_hosts()
+        .list()
+        .into_iter()
+        .map(|(host, port, entry)| KnownHostDto {
+            host,
+            port,
+            algorithm: entry.algorithm,
+            fingerprint: entry.fingerprint,
+        })
+        .collect()
+}
+
+/// 命令: 清除一条指纹记忆 (服务器重装/换机后, 用户确认变更时;
+/// 清除后下次连接重新 TOFU 记住新指纹)
+#[tauri::command]
+async fn known_hosts_forget(
+    state: tauri::State<'_, AppState>,
+    host: String,
+    port: u16,
+) -> Result<Vec<KnownHostDto>, String> {
+    state
+        .registry
+        .known_hosts()
+        .forget(&host, port)
+        .then_some(())
+        .ok_or_else(|| format!("没有 {host}:{port} 的指纹记录"))?;
+    Ok(known_hosts_list(state))
 }
 
 // ---------- 档案命令 (v2 存储) ----------
@@ -482,6 +531,8 @@ pub fn run() {
             delete_profile,
             profile_defaults_get,
             profile_defaults_save,
+            known_hosts_list,
+            known_hosts_forget,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -1,8 +1,8 @@
 //! 隧道引擎 headless 测试: 注册表 + 状态机任务 + 事件序列
 //!
 //! 覆盖: 生命周期 (Starting→Running→Stopped)、致命错误立即停
-//! (错误密码不进退避, 事件流断言)、持久化往返 (tunnels.json 恢复)、
-//! 网络掉线快试重连、retry_now 跳过退避。
+//! (错误密码 / TOFU 指纹变更, 均不进退避, 事件流断言)、持久化往返
+//! (tunnels.json 恢复)、网络掉线快试重连、retry_now 跳过退避。
 //! 连接类用例打真实测试服务器 (同 e2e_direct 模式, 目标 = 服务器自身 22 端口)。
 
 use std::sync::Arc;
@@ -199,6 +199,62 @@ async fn wrong_password_stops_without_retry() {
         msg.contains("认证被拒") || msg.contains("密码"),
         "提示应指向密码问题: {msg}"
     );
+}
+
+/// TOFU 指纹校验: 记忆库中预置伪造指纹 → 连接被拒,
+/// Failed{retryable:false} + 指纹变更文案, 不进退避 (防中间人场景空转重连)
+#[tokio::test]
+async fn host_key_mismatch_is_fatal() {
+    let registry = Registry::new();
+    let collector = Collector::default();
+    let events: Arc<dyn TunnelEvents> = Arc::new(collector.clone());
+    let spec = local_spec(free_port());
+    let id = spec.id.clone();
+    registry.create(spec).expect("创建失败");
+
+    // 伪造指纹 (与真实服务器必然不符)
+    let c = proxy_tool_core::creds::load();
+    registry.known_hosts().remember(
+        &c.server,
+        22,
+        proxy_tool_core::known_hosts::KnownHost {
+            algorithm: "ssh-ed25519".into(),
+            fingerprint: "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA".into(),
+        },
+    );
+
+    registry
+        .start(&id, creds(), events)
+        .await
+        .expect("启动失败");
+    wait_state(&registry, &id, |s| {
+        matches!(
+            s,
+            TunnelState::Failed {
+                retryable: false,
+                ..
+            }
+        )
+    })
+    .await;
+
+    // 等一个退避周期, 确认没有重试
+    tokio::time::sleep(Duration::from_millis(2500)).await;
+    let statuses = collector.statuses();
+    assert_eq!(
+        statuses
+            .iter()
+            .filter(|(_, _, s, _)| s == "reconnecting")
+            .count(),
+        0,
+        "指纹变更不得进退避: {statuses:?}"
+    );
+    let msg = statuses
+        .iter()
+        .find(|(_, _, s, _)| s == "error")
+        .and_then(|(_, _, _, m)| m.clone())
+        .expect("error 事件应带消息");
+    assert!(msg.contains("指纹已变更"), "提示应指向指纹变更: {msg}");
 }
 
 /// 持久化: create 落盘 → 新 Registry restore 恢复列表 (Stopped 起点)

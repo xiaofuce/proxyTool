@@ -109,6 +109,7 @@ interface RowRefs {
   btnStart: HTMLButtonElement;
   btnStop: HTMLButtonElement;
   btnRetry: HTMLButtonElement;
+  btnTrust: HTMLButtonElement;
   btnVerify: HTMLButtonElement;
   btnDeploy: HTMLButtonElement;
 }
@@ -135,6 +136,8 @@ const pages = document.querySelectorAll<HTMLElement>(".page");
 function showPage(name: string) {
   navItems.forEach((b) => b.classList.toggle("active", b.dataset.page === name));
   pages.forEach((p) => p.classList.toggle("active", p.dataset.page === name));
+  // 服务器页: 指纹记忆随连接动态增长 (TOFU), 每次进入刷新
+  if (name === "servers") refreshKnownHosts().catch(() => {});
 }
 navItems.forEach((b) => b.addEventListener("click", () => showPage(b.dataset.page!)));
 
@@ -188,6 +191,10 @@ function updateRow(t: TunnelDto) {
   refs.btnStart.disabled = active;
   refs.btnStop.disabled = !active;
   refs.btnRetry.hidden = t.state !== "reconnecting";
+  // 指纹变更错误 (TOFU 拒绝): 给一条「信任新指纹」的恢复路径
+  refs.btnTrust.hidden = !(
+    t.state === "error" && (t.message ?? "").includes("指纹已变更")
+  );
 
   const vpn = isVpnShare(t);
   refs.btnVerify.hidden = !vpn;
@@ -250,6 +257,8 @@ function renderTunnels() {
     const btnStart = mkBtn("启动");
     const btnStop = mkBtn("停止");
     const btnRetry = mkBtn("立即重试");
+    const btnTrust = mkBtn("信任新指纹");
+    btnTrust.title = "服务器指纹变更被拒后, 清除记录并重连 (仅服务器确已重装/更换时使用)";
     const btnVerify = mkBtn("验证外网");
     btnVerify.title = "在服务器上经隧道测试访问外网 (google)";
     const btnDeploy = mkBtn("部署 proxy");
@@ -300,6 +309,7 @@ function renderTunnels() {
       btnStart,
       btnStop,
       btnRetry,
+      btnTrust,
       btnVerify,
       btnDeploy,
     };
@@ -369,6 +379,28 @@ function renderTunnels() {
       } catch (err) {
         appendLog(t.id, `❌ ${err}`);
       }
+    });
+    btnTrust.addEventListener("click", async () => {
+      const profile = profiles.find((p) => p.id === t.profileId);
+      if (!profile) {
+        appendLog(t.id, "❌ 隧道关联的档案缺失, 无法定位指纹记录");
+        return;
+      }
+      if (
+        !confirm(
+          `清除 ${profile.host}:${profile.port} 的旧指纹并重连?\n仅当服务器确已重装/更换时继续 —— 否则可能是中间人攻击。`
+        )
+      )
+        return;
+      try {
+        await invoke("known_hosts_forget", { host: profile.host, port: profile.port });
+        appendLog(t.id, `已清除 ${profile.host}:${profile.port} 的指纹记录, 重连后将重新记忆当前指纹`);
+      } catch (err) {
+        appendLog(t.id, `❌ ${err}`);
+        return;
+      }
+      // 复用启动路径: 有缓存密码直接重启, 否则展开密码条
+      btnStart.click();
     });
     const runAction = async (cmd: "verify_remote_tunnel" | "deploy_wrapper") => {
       const pass = passwords.get(t.profileId);
@@ -796,6 +828,55 @@ el<HTMLFormElement>("profile-form").addEventListener("submit", async (e) => {
 });
 
 el<HTMLButtonElement>("profile-clear").addEventListener("click", clearProfileForm);
+
+// ---------- 主机密钥记忆 (TOFU) ----------
+interface KnownHostEntry {
+  host: string;
+  port: number;
+  algorithm: string;
+  fingerprint: string;
+}
+
+async function refreshKnownHosts() {
+  const list = await invoke<KnownHostEntry[]>("known_hosts_list");
+  const container = el<HTMLDivElement>("known-hosts-list");
+  container.innerHTML = "";
+  if (list.length === 0) {
+    container.innerHTML =
+      '<div class="hint" style="min-height:0;margin:4px 0">还没有记忆 —— 首次连接某台服务器后出现在这里</div>';
+    return;
+  }
+  for (const h of list) {
+    const row = document.createElement("div");
+    row.className = "profile-row";
+
+    const info = document.createElement("div");
+    info.className = "profile-info";
+    info.innerHTML = `<strong>${escapeHtml(h.host)}:${h.port}</strong><span>${escapeHtml(h.algorithm)} · ${escapeHtml(h.fingerprint)}</span>`;
+
+    const delBtn = document.createElement("button");
+    delBtn.type = "button";
+    delBtn.textContent = "清除";
+    delBtn.className = "danger";
+    delBtn.addEventListener("click", async () => {
+      if (
+        !confirm(
+          `清除 ${h.host}:${h.port} 的指纹记录?\n下次连接将重新记住当前指纹 (仅服务器确已变更时操作)。`
+        )
+      )
+        return;
+      try {
+        await invoke("known_hosts_forget", { host: h.host, port: h.port });
+        await refreshKnownHosts();
+      } catch (err) {
+        alert(`清除失败: ${err}`);
+      }
+    });
+
+    row.append(info, delBtn);
+    container.append(row);
+  }
+}
 
 // ---------- 分层默认值 (档案层) ----------
 async function loadDefaults() {

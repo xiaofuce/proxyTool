@@ -17,6 +17,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use proxy_tool_core::known_hosts::KnownHosts;
 use proxy_tool_core::socks::start_socks_server;
 use proxy_tool_core::transport::python_bridge;
 use proxy_tool_core::tunnel::{run_tunnel, Logger, TunnelConfig};
@@ -298,6 +299,7 @@ async fn session_mode_passes_large_data() {
         local_proxy_host: "127.0.0.1".into(),
         local_proxy_port: echo_port,
         keepalive: Default::default(),
+        known_hosts: KnownHosts::in_memory(),
     };
     let logger: Logger = Arc::new(|msg| println!("[tunnel] {msg}"));
     let (_tunnel, _bound) = python_bridge::establish(cfg, logger)
@@ -362,6 +364,7 @@ async fn session_mode_multi_conn() {
         local_proxy_host: "127.0.0.1".into(),
         local_proxy_port: echo_port,
         keepalive: Default::default(),
+        known_hosts: KnownHosts::in_memory(),
     };
     let logger: Logger = Arc::new(|msg| println!("[tunnel] {msg}"));
     let (_tunnel, _bound) = python_bridge::establish(cfg, logger)
@@ -440,6 +443,7 @@ async fn std_mode_diag() {
         local_proxy_host: "127.0.0.1".into(),
         local_proxy_port: port,
         keepalive: Default::default(),
+        known_hosts: KnownHosts::in_memory(),
     };
     let logger: Logger = Arc::new(|msg| println!("[tunnel] {msg}"));
     let ((_tunnel, _c), _bound) = run_tunnel(cfg, logger).await.expect("隧道建立失败");
@@ -501,6 +505,7 @@ async fn server_can_reach_internet_through_tunnel() {
         local_proxy_host: "127.0.0.1".into(),
         local_proxy_port: local_port,
         keepalive: Default::default(),
+        known_hosts: KnownHosts::in_memory(),
     };
     let logger: Logger = Arc::new(|msg| println!("[tunnel] {msg}"));
     let ((_tunnel, _corrupted), _bound) = run_tunnel(cfg, logger).await.expect("隧道建立失败");
@@ -590,6 +595,7 @@ async fn disconnect_closes_session() {
         local_proxy_host: "127.0.0.1".into(),
         local_proxy_port: echo_port,
         keepalive: Default::default(),
+        known_hosts: KnownHosts::in_memory(),
     };
     let logger: Logger = Arc::new(|msg| println!("[tunnel] {msg}"));
     let ((session, _corrupted), _bound) = run_tunnel(cfg, logger).await.expect("隧道建立失败");
@@ -661,6 +667,7 @@ async fn port_zero_dynamic_allocation() {
         local_proxy_host: "127.0.0.1".into(),
         local_proxy_port: echo_port,
         keepalive: Default::default(),
+        known_hosts: KnownHosts::in_memory(),
     };
     let logger: Logger = Arc::new(|msg| println!("[tunnel] {msg}"));
     let ((_session, _c), bound) = run_tunnel(cfg, logger).await.expect("端口 0 隧道建立失败");

@@ -20,6 +20,7 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
+use crate::known_hosts::KnownHosts;
 use crate::model::TunnelError;
 use crate::transport::russh_direct::TunnelHandler;
 use crate::transport::{python_bridge, russh_direct};
@@ -39,6 +40,8 @@ pub struct TunnelConfig {
     pub local_proxy_port: u16,
     /// SSH 保活 (来自隧道 ReconnectPolicy, 判死时延 = interval × max)
     pub keepalive: crate::ssh::Keepalive,
+    /// 主机密钥记忆库 (TOFU; Arc 共享, 引擎注册表提供)
+    pub known_hosts: Arc<KnownHosts>,
 }
 
 /// 日志回调 (定义在 ssh.rs, 三种隧道模式共用)
@@ -100,12 +103,14 @@ pub async fn run_tunnel(
         }
         Err(e) => {
             // 连接/认证阶段的失败与转发模式无关, 直接透传 ——
-            // 兼容模式用的是同一条 SSH 连接, 重试必然同样失败 (错误密码不做无谓二次连接)。
+            // 兼容模式用的是同一条 SSH 连接, 重试必然同样失败 (错误密码不做无谓二次连接);
+            // 指纹变更 (HostKeyChanged) 同样与模式无关, 且为致命错误, 不回退。
             if matches!(
                 e,
                 TunnelError::Connect { .. }
                     | TunnelError::AuthIo { .. }
                     | TunnelError::AuthRejected
+                    | TunnelError::HostKeyChanged { .. }
             ) {
                 return Err(e);
             }

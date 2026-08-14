@@ -10,6 +10,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use proxy_tool_core::direct::{run_dynamic_forward, run_local_forward, DirectConfig};
+use proxy_tool_core::known_hosts::KnownHosts;
 use proxy_tool_core::ssh::Logger;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
@@ -33,6 +34,7 @@ fn cfg(listen_port: u16) -> DirectConfig {
         listen_host: "127.0.0.1".into(),
         listen_port,
         keepalive: Default::default(),
+        known_hosts: KnownHosts::in_memory(),
     }
 }
 

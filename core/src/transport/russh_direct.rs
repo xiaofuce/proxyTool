@@ -22,6 +22,7 @@ use russh::Channel;
 use tokio::io::{copy_bidirectional, AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
+use crate::known_hosts::HostKeyCheck;
 use crate::model::TunnelError;
 use crate::ssh::Logger;
 use crate::tunnel::{TunnelConfig, TunnelSession};
@@ -32,17 +33,19 @@ pub struct TunnelHandler {
     pub(crate) logger: Logger,
     /// 首字节检查发现通道被注入审计数据时置位 (云主机安全组件场景)
     pub(crate) corrupted: Arc<AtomicBool>,
+    /// 主机密钥 TOFU 校验 (P6; 指纹变更详情经 take_error 取回)
+    pub(crate) host_check: Arc<HostKeyCheck>,
 }
 
 impl client::Handler for TunnelHandler {
     type Error = russh::Error;
 
-    /// 信任任意服务器公钥 (MVP; 后续可升级为 known_hosts 校验)
+    /// known_hosts TOFU 校验 (首次记住 / 一致放行 / 变更拒绝, 见 known_hosts.rs)
     async fn check_server_key(
         &mut self,
-        _server_public_key: &ssh_key::PublicKey,
+        server_public_key: &ssh_key::PublicKey,
     ) -> Result<bool, Self::Error> {
-        Ok(true)
+        Ok(self.host_check.verify(server_public_key))
     }
 
     /// 服务器有流量要转发回来时被调用:
@@ -131,18 +134,26 @@ impl client::Handler for TunnelHandler {
 }
 
 /// 连接 + 密码认证 (标准/兼容两种模式共用), 返回会话与污染标记。
-/// 认证逻辑共用 ssh::connect_auth。
+/// 认证逻辑共用 ssh::connect_auth; 主机密钥经 known_hosts TOFU 校验,
+/// 指纹变更 → `TunnelError::HostKeyChanged` (致命, 见 known_hosts.rs)。
 pub(crate) async fn connect_and_auth(
     cfg: &TunnelConfig,
     logger: &Logger,
 ) -> Result<(client::Handle<TunnelHandler>, Arc<AtomicBool>), TunnelError> {
     let corrupted = Arc::new(AtomicBool::new(false));
+    let host_check = HostKeyCheck::new(
+        cfg.known_hosts.clone(),
+        &cfg.server_host,
+        cfg.server_port,
+        logger.clone(),
+    );
     let handler = TunnelHandler {
         cfg: cfg.clone(),
         logger: logger.clone(),
         corrupted: corrupted.clone(),
+        host_check: host_check.clone(),
     };
-    let session = crate::ssh::connect_auth(
+    let session = match crate::ssh::connect_auth(
         &cfg.server_host,
         cfg.server_port,
         &cfg.username,
@@ -151,7 +162,13 @@ pub(crate) async fn connect_and_auth(
         handler,
         logger,
     )
-    .await?;
+    .await
+    {
+        Ok(s) => s,
+        // 指纹被拒 (russh::Error::UnknownKey) → 致命的 HostKeyChanged,
+        // 避免落入可重试的 Connect 误分类
+        Err(e) => return Err(host_check.take_error().unwrap_or(e)),
+    };
     Ok((session, corrupted))
 }
 

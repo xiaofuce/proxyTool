@@ -17,6 +17,7 @@ use tokio::io::copy_bidirectional;
 use tokio::net::TcpListener;
 use tokio::sync::{Mutex, Notify};
 
+use crate::known_hosts::KnownHosts;
 use crate::model::TunnelError;
 use crate::socks::{Connector, SocksServerHandle};
 use crate::ssh::{ConnectHandler, Logger};
@@ -35,6 +36,8 @@ pub struct DirectConfig {
     pub listen_port: u16,
     /// SSH 保活 (来自隧道 ReconnectPolicy, 判死时延 = interval × max)
     pub keepalive: crate::ssh::Keepalive,
+    /// 主机密钥记忆库 (TOFU; Arc 共享, 引擎注册表提供)
+    pub known_hosts: Arc<KnownHosts>,
 }
 
 /// 活动中的本地/动态隧道会话
@@ -85,6 +88,36 @@ async fn wait_closed(handle: &Arc<Mutex<client::Handle<ConnectHandler>>>) {
     }
 }
 
+/// 连接 + 密码认证 (本地/动态共用): handler 带 known_hosts TOFU 校验,
+/// 失败时优先返回指纹变更的致命错误 (见 known_hosts.rs 的 take_error 手法)。
+async fn connect_direct(
+    cfg: &DirectConfig,
+    logger: &Logger,
+) -> Result<Arc<Mutex<client::Handle<ConnectHandler>>>, TunnelError> {
+    let handler = ConnectHandler::new(
+        logger.clone(),
+        cfg.known_hosts.clone(),
+        &cfg.server_host,
+        cfg.server_port,
+    );
+    let host_check = handler.host_check.clone();
+    let session = match crate::ssh::connect_auth(
+        &cfg.server_host,
+        cfg.server_port,
+        &cfg.username,
+        &cfg.password,
+        cfg.keepalive,
+        handler,
+        logger,
+    )
+    .await
+    {
+        Ok(s) => s,
+        Err(e) => return Err(host_check.take_error().unwrap_or(e)),
+    };
+    Ok(Arc::new(Mutex::new(session)))
+}
+
 /// 本地端口转发 (ssh -L): 监听本机端口, 每连接经 SSH 转发到 target_host:target_port。
 /// 返回会话句柄 + 后台任务 (任务结束 = 隧道已停止)。
 pub async fn run_local_forward(
@@ -93,20 +126,7 @@ pub async fn run_local_forward(
     target_port: u16,
     logger: Logger,
 ) -> Result<(Arc<DirectSession>, tokio::task::JoinHandle<()>), TunnelError> {
-    let handle = Arc::new(Mutex::new(
-        crate::ssh::connect_auth(
-            &cfg.server_host,
-            cfg.server_port,
-            &cfg.username,
-            &cfg.password,
-            cfg.keepalive,
-            ConnectHandler {
-                logger: logger.clone(),
-            },
-            &logger,
-        )
-        .await?,
-    ));
+    let handle = connect_direct(&cfg, &logger).await?;
 
     let listener = TcpListener::bind((cfg.listen_host.as_str(), cfg.listen_port))
         .await
@@ -196,20 +216,7 @@ pub async fn run_dynamic_forward(
     cfg: DirectConfig,
     logger: Logger,
 ) -> Result<(Arc<DirectSession>, tokio::task::JoinHandle<()>), TunnelError> {
-    let handle = Arc::new(Mutex::new(
-        crate::ssh::connect_auth(
-            &cfg.server_host,
-            cfg.server_port,
-            &cfg.username,
-            &cfg.password,
-            cfg.keepalive,
-            ConnectHandler {
-                logger: logger.clone(),
-            },
-            &logger,
-        )
-        .await?,
-    ));
+    let handle = connect_direct(&cfg, &logger).await?;
 
     let connector = Connector::Ssh {
         handle: handle.clone(),

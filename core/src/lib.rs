@@ -9,6 +9,7 @@
 //! - `engine`: 隧道注册表 + 每隧道状态机任务 (L2, 重连在此)
 //! - `backend`: 反向隧道的本地落地解析 (Tcp / SocksAuto: VPN 探测 + 内置 SOCKS)
 //! - `ssh`: 连接/密码认证/远程执行 (三种模式共用)
+//! - `known_hosts`: 服务器主机密钥记忆库 (TOFU, 指纹变更 = 致命)
 //! - `socks`: 内置 SOCKS5 服务器 (连接器可插拔: Plain / 经 SSH)
 //! - `presets`: 场景预设 (L3)——预设 id → TunnelSpec 模板 + 附加动作
 //! - `probe`: 本机代理端口探测 (VPN 无关化)
@@ -20,6 +21,7 @@ pub mod backend;
 pub mod creds;
 pub mod direct;
 pub mod engine;
+pub mod known_hosts;
 pub mod model;
 pub mod presets;
 pub mod probe;

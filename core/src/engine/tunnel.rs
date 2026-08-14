@@ -22,6 +22,7 @@ use tokio::sync::watch;
 
 use crate::backend::BackendPool;
 use crate::direct;
+use crate::known_hosts::KnownHosts;
 use crate::model::{ReconnectPolicy, TunnelError, TunnelKind, TunnelSpec, TunnelState};
 use crate::ssh::Logger;
 use crate::tunnel::{self, TunnelEvent};
@@ -84,6 +85,7 @@ pub(super) async fn run_task(
     retry_now: Arc<AtomicBool>,
     state_tx: watch::Sender<TunnelState>,
     backend: Arc<BackendPool>,
+    known_hosts: Arc<KnownHosts>,
     events: Arc<dyn TunnelEvents>,
     on_bound_port: Arc<dyn Fn(u16) + Send + Sync>,
 ) {
@@ -140,6 +142,7 @@ pub(super) async fn run_task(
             &reverse_local,
             &on_bound_port,
             &connected_at,
+            &known_hosts,
         )
         .await;
         if let Err(e) = &result {
@@ -189,6 +192,7 @@ pub(super) async fn run_task(
 /// 一次尝试: 建立并运行隧道直到断开 (Ok) 或建连失败 (Err)。
 /// 会话句柄填入共享槽 (注册表据此硬断开), 结束时清槽。
 /// `connected_at`: 进入 Running 时写入 (alive_reset 判据)。
+#[allow(clippy::too_many_arguments)]
 async fn attempt(
     spec: &TunnelSpec,
     creds: &SshCreds,
@@ -199,6 +203,7 @@ async fn attempt(
     reverse_local: &Option<(String, u16)>,
     on_bound_port: &Arc<dyn Fn(u16) + Send + Sync>,
     connected_at: &Arc<Mutex<Option<Instant>>>,
+    known_hosts: &Arc<KnownHosts>,
 ) -> Result<(), TunnelError> {
     let id = spec.id.clone();
     let tag = spec.kind.tag();
@@ -221,6 +226,7 @@ async fn attempt(
                 local_proxy_host: local_host,
                 local_proxy_port: local_port,
                 keepalive,
+                known_hosts: known_hosts.clone(),
             };
             // start_tunnel 回调: Connected → Running; BoundPort → 注册表回填
             let st = state_tx.clone();
@@ -257,6 +263,7 @@ async fn attempt(
                 listen_host: bind.clone(),
                 listen_port: *port,
                 keepalive,
+                known_hosts: known_hosts.clone(),
             };
             match direct::run_local_forward(cfg, target_host.clone(), *target_port, logger.clone())
                 .await
@@ -286,6 +293,7 @@ async fn attempt(
                 listen_host: bind.clone(),
                 listen_port: *port,
                 keepalive,
+                known_hosts: known_hosts.clone(),
             };
             match direct::run_dynamic_forward(cfg, logger.clone()).await {
                 Ok((session, task)) => {

@@ -242,6 +242,15 @@ pub enum TunnelError {
         source: russh::Error,
     },
 
+    /// 服务器主机密钥指纹与记忆不符 (known_hosts TOFU 校验失败) —— 立即停止:
+    /// 重连无意义, 且可能是中间人攻击; 服务器确已重装时由用户清除记录后重连。
+    #[error("服务器 {host} 主机密钥指纹已变更 (预期 {expected}, 实际 {actual}) —— 若服务器确已重装, 请在「服务器」页清除指纹记录后重试")]
+    HostKeyChanged {
+        host: String,
+        expected: String,
+        actual: String,
+    },
+
     /// 用户主动断开 —— 静默停止, 不报错不重连。
     /// (P4 重连引擎引入: 现阶段断开意图经 disconnect_intent 标志传递)
     #[error("已取消")]
@@ -301,8 +310,19 @@ mod tests {
             port: 1081,
             reason: "administratively prohibited".into(),
         };
+        let host_key_changed = TunnelError::HostKeyChanged {
+            host: "1.2.3.4:22".into(),
+            expected: "SHA256:aaa".into(),
+            actual: "SHA256:bbb".into(),
+        };
         let cancelled = TunnelError::Cancelled;
-        for e in [&auth_rejected, &port_in_use, &forward_rejected, &cancelled] {
+        for e in [
+            &auth_rejected,
+            &port_in_use,
+            &forward_rejected,
+            &host_key_changed,
+            &cancelled,
+        ] {
             assert!(!e.retryable(), "{e} 应为致命 (停止重连)");
         }
     }

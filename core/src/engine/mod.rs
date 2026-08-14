@@ -15,6 +15,7 @@ use std::sync::{Arc, Mutex};
 use tokio::sync::{watch, Mutex as AsyncMutex};
 
 use crate::backend::BackendPool;
+use crate::known_hosts::KnownHosts;
 use crate::model::{TunnelKind, TunnelSpec, TunnelState};
 use crate::store;
 use crate::TunnelEvents;
@@ -122,25 +123,35 @@ pub struct Registry {
     /// Arc 包裹: 端口回填回调 (状态机任务触发) 需要跨任务访问条目表
     entries: Arc<Mutex<HashMap<String, Entry>>>,
     backend: Arc<BackendPool>,
+    /// 主机密钥记忆库 (TOFU): 全部隧道共享, 持久化时随 dir 落盘
+    known_hosts: Arc<KnownHosts>,
 }
 
 impl Registry {
-    /// 不持久化的注册表 (测试)
+    /// 不持久化的注册表 (测试; known_hosts 亦仅内存)
     pub fn new() -> Self {
         Self {
             dir: None,
             entries: Arc::new(Mutex::new(HashMap::new())),
             backend: Arc::new(BackendPool::new()),
+            known_hosts: KnownHosts::in_memory(),
         }
     }
 
-    /// 持久化注册表 (GUI: app_data_dir)
+    /// 持久化注册表 (GUI: app_data_dir; known_hosts.json 同目录)
     pub fn persistent(dir: PathBuf) -> Self {
+        let known_hosts = KnownHosts::load(&dir);
         Self {
             dir: Some(dir),
             entries: Arc::new(Mutex::new(HashMap::new())),
             backend: Arc::new(BackendPool::new()),
+            known_hosts,
         }
+    }
+
+    /// 主机密钥记忆库 (TOFU 校验 / UI 列表与清除)
+    pub fn known_hosts(&self) -> &Arc<KnownHosts> {
+        &self.known_hosts
     }
 
     /// 应用启动: 从 tunnels.json 恢复隧道列表 (只恢复配置, 不自动启动 ——
@@ -209,6 +220,7 @@ impl Registry {
             )
         };
         let on_bound_port = self.bound_port_updater(id, &events);
+        let known_hosts = self.known_hosts.clone();
         let task = tokio::spawn(tunnel::run_task(
             spec,
             creds,
@@ -217,6 +229,7 @@ impl Registry {
             retry_now,
             state_tx,
             self.backend.clone(),
+            known_hosts,
             events,
             on_bound_port,
         ));
