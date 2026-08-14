@@ -1,0 +1,328 @@
+//! 隧道引擎 (L2, 设计 §3.2/§3.7): 注册表 + 每隧道状态机任务
+//!
+//! `Registry`: `map<id, Entry>` —— 隧道是一等实体, 可多条并存、持久化
+//! (store::tunnels.json, 密码永不落盘 —— 启动时只恢复列表, 凭据由调用方
+//! 在 start 时注入)。每条运行中的隧道一个状态机任务 (engine/tunnel.rs,
+//! actor 式: 停止 = 停止标志 + 关闭会话槽, 任务自行收尾退出)。
+//!
+//! 旧 GUI 三页经 `start_legacy` 接入: 固定 id (= 形态 tag), 不持久化,
+//! 前端事件流 (kind 键控) 不变; 新命令面用 uuid id + 持久化。
+
+mod tunnel;
+
+use std::collections::HashMap;
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+
+use tokio::sync::{watch, Mutex as AsyncMutex};
+
+use crate::backend::BackendPool;
+use crate::model::{TunnelKind, TunnelSpec, TunnelState};
+use crate::store;
+use crate::TunnelEvents;
+
+/// 建连凭据 (每次启动时由调用方注入; 密码仅存内存)
+#[derive(Debug, Clone)]
+pub struct SshCreds {
+    pub host: String,
+    pub port: u16,
+    pub username: String,
+    pub password: String,
+}
+
+/// 会话槽: 任务与注册表共享同一底层槽 (Arc 包裹, 浅克隆即共享)。
+/// 任务连接成功时填入、结束时清空; 注册表 stop 时从中取走句柄硬断开
+/// (仅 drop Arc 不够: 后台任务持有 clone, 见 tunnel::close_session 注释)。
+pub enum SessionSlot {
+    Reverse(crate::tunnel::TunnelSlot),
+    Direct(Arc<AsyncMutex<Option<Arc<crate::direct::DirectSession>>>>),
+}
+
+impl SessionSlot {
+    fn new(spec: &TunnelSpec) -> Self {
+        match spec.kind {
+            TunnelKind::Reverse { .. } => SessionSlot::Reverse(Arc::new(AsyncMutex::new(None))),
+            _ => SessionSlot::Direct(Arc::new(AsyncMutex::new(None))),
+        }
+    }
+
+    /// 浅克隆: 共享同一底层槽
+    fn shallow(&self) -> SessionSlot {
+        match self {
+            SessionSlot::Reverse(s) => SessionSlot::Reverse(s.clone()),
+            SessionSlot::Direct(s) => SessionSlot::Direct(s.clone()),
+        }
+    }
+
+    /// 硬断开当前会话 (无会话则无操作)
+    async fn close_current(&self) {
+        match self {
+            SessionSlot::Reverse(slot) => {
+                if let Some(session) = slot.lock().await.take() {
+                    crate::tunnel::close_session(&session).await;
+                }
+            }
+            SessionSlot::Direct(slot) => {
+                if let Some(session) = slot.lock().await.take() {
+                    session.disconnect().await;
+                }
+            }
+        }
+    }
+
+    /// 清槽 (任务收尾用; 不触发断开 —— 会话已结束)
+    pub(super) async fn clear(&self) {
+        match self {
+            SessionSlot::Reverse(slot) => *slot.lock().await = None,
+            SessionSlot::Direct(slot) => *slot.lock().await = None,
+        }
+    }
+}
+
+/// 注册表内的单条隧道
+struct Entry {
+    spec: TunnelSpec,
+    /// false = 旧页面临时隧道 (不落盘)
+    persisted: bool,
+    state_tx: watch::Sender<TunnelState>,
+    /// 持有接收端: watch 通道在所有 Receiver drop 后关闭, 之后 send 静默失败
+    /// (状态会永远停在初值 —— 曾踩过的坑), 注册表查询也用它快照
+    state_rx: watch::Receiver<TunnelState>,
+    stop: Arc<AtomicBool>,
+    slot: SessionSlot,
+    task: Option<tokio::task::JoinHandle<()>>,
+}
+
+impl Entry {
+    fn state(&self) -> TunnelState {
+        self.state_rx.borrow().clone()
+    }
+
+    fn running(&self) -> bool {
+        self.task.as_ref().is_some_and(|t| !t.is_finished())
+    }
+}
+
+/// 建表条目的公共部分 (spec 之外的运行部件)
+fn new_entry_parts(spec: &TunnelSpec, persisted: bool) -> Entry {
+    let (state_tx, state_rx) = watch::channel(TunnelState::Stopped);
+    Entry {
+        spec: spec.clone(),
+        persisted,
+        state_tx,
+        state_rx,
+        stop: Arc::new(AtomicBool::new(false)),
+        slot: SessionSlot::new(spec),
+        task: None,
+    }
+}
+
+/// 隧道注册表: 多条隧道并存, 持久化到 `<dir>/tunnels.json`。
+/// `dir = None` 时不持久化 (测试用)。
+pub struct Registry {
+    dir: Option<PathBuf>,
+    entries: Mutex<HashMap<String, Entry>>,
+    backend: Arc<BackendPool>,
+}
+
+impl Registry {
+    /// 不持久化的注册表 (测试)
+    pub fn new() -> Self {
+        Self {
+            dir: None,
+            entries: Mutex::new(HashMap::new()),
+            backend: Arc::new(BackendPool::new()),
+        }
+    }
+
+    /// 持久化注册表 (GUI: app_data_dir)
+    pub fn persistent(dir: PathBuf) -> Self {
+        Self {
+            dir: Some(dir),
+            entries: Mutex::new(HashMap::new()),
+            backend: Arc::new(BackendPool::new()),
+        }
+    }
+
+    /// 应用启动: 从 tunnels.json 恢复隧道列表 (只恢复配置, 不自动启动 ——
+    /// 凭据不落盘, 由用户启动时输入; P6 密钥认证后可真自动启动)
+    pub fn restore(&self) -> Vec<TunnelSpec> {
+        let Some(dir) = &self.dir else {
+            return Vec::new();
+        };
+        let specs = store::load_tunnels(dir);
+        let mut entries = self.entries.lock().unwrap();
+        for spec in specs {
+            let entry = new_entry_parts(&spec, true);
+            entries.insert(spec.id.clone(), entry);
+        }
+        let restored: Vec<TunnelSpec> = entries
+            .values()
+            .filter(|e| e.persisted)
+            .map(|e| e.spec.clone())
+            .collect();
+        restored
+    }
+
+    /// 全量快照: (spec, 当前状态)
+    pub fn list(&self) -> Vec<(TunnelSpec, TunnelState)> {
+        self.entries
+            .lock()
+            .unwrap()
+            .values()
+            .map(|e| (e.spec.clone(), e.state()))
+            .collect()
+    }
+
+    /// 新建隧道 (校验 + 入表 + 落盘)
+    pub fn create(&self, spec: TunnelSpec) -> Result<(), String> {
+        spec.validate()?;
+        {
+            let mut entries = self.entries.lock().unwrap();
+            if entries.contains_key(&spec.id) {
+                return Err(format!("隧道 id 已存在: {}", spec.id));
+            }
+            entries.insert(spec.id.clone(), new_entry_parts(&spec, true));
+        }
+        self.persist();
+        Ok(())
+    }
+
+    /// 启动隧道 (已在运行则报错)。凭据由调用方注入 (密码不落盘)。
+    pub async fn start(
+        &self,
+        id: &str,
+        creds: SshCreds,
+        events: Arc<dyn TunnelEvents>,
+    ) -> Result<(), String> {
+        let (spec, slot, stop, state_tx) = {
+            let mut entries = self.entries.lock().unwrap();
+            let entry = entries
+                .get_mut(id)
+                .ok_or_else(|| format!("隧道不存在: {id}"))?;
+            if entry.running() {
+                return Err("隧道已在运行".into());
+            }
+            entry.stop.store(false, Ordering::SeqCst);
+            (
+                entry.spec.clone(),
+                entry.slot.shallow(),
+                entry.stop.clone(),
+                entry.state_tx.clone(),
+            )
+        };
+        let task = tokio::spawn(tunnel::run_task(
+            spec,
+            creds,
+            slot,
+            stop,
+            state_tx,
+            self.backend.clone(),
+            events,
+        ));
+        self.entries
+            .lock()
+            .unwrap()
+            .get_mut(id)
+            .expect("启动期间条目不会消失")
+            .task = Some(task);
+        Ok(())
+    }
+
+    /// 停止隧道: 置停止意图 + 硬断开当前会话 (任务检测到后收尾退出)
+    pub async fn stop(&self, id: &str) -> Result<(), String> {
+        let (stop, slot) = {
+            let entries = self.entries.lock().unwrap();
+            let entry = entries.get(id).ok_or_else(|| format!("隧道不存在: {id}"))?;
+            (entry.stop.clone(), entry.slot.shallow())
+        };
+        stop.store(true, Ordering::SeqCst);
+        slot.close_current().await; // 未运行时无会话, 无操作
+        Ok(())
+    }
+
+    /// 删除隧道 (运行中先停止; 条目移出, 任务自行收尾退出)
+    pub async fn delete(&self, id: &str) -> Result<(), String> {
+        self.stop(id).await.ok(); // 不存在时下面统一报
+        let removed = {
+            let mut entries = self.entries.lock().unwrap();
+            entries.remove(id)
+        };
+        removed.ok_or_else(|| format!("隧道不存在: {id}"))?;
+        self.persist();
+        Ok(())
+    }
+
+    /// 旧页面接入: 固定 id (= kind tag) 的临时隧道, 不落盘。
+    /// 同 id 已存在 (含运行中) 则先替换 —— 旧页面「连接 = 新参数重建」语义。
+    pub async fn start_legacy(
+        &self,
+        spec: TunnelSpec,
+        creds: SshCreds,
+        events: Arc<dyn TunnelEvents>,
+    ) -> Result<(), String> {
+        spec.validate()?;
+        let id = spec.id.clone();
+        // 同 id 旧隧道: 置停止 + 硬断开, 移出表 (不等退出, 旧任务自然收尾)。
+        // 注意先绑定再 if let: 若直接作 scrutinee, MutexGuard 临时会活到整个
+        // if let 结束 (Rust 2021 语义), 跨 await 持锁会让本协程 !Send。
+        let old = self.entries.lock().unwrap().remove(&id);
+        if let Some(old) = old {
+            old.stop.store(true, Ordering::SeqCst);
+            old.slot.shallow().close_current().await;
+        }
+        let (state_tx, slot, stop) = {
+            let mut entries = self.entries.lock().unwrap();
+            let entry = new_entry_parts(&spec, false);
+            let (state_tx, slot, stop) = (
+                entry.state_tx.clone(),
+                entry.slot.shallow(),
+                entry.stop.clone(),
+            );
+            entries.insert(id.clone(), entry);
+            (state_tx, slot, stop)
+        };
+        let task = tokio::spawn(tunnel::run_task(
+            spec,
+            creds,
+            slot,
+            stop,
+            state_tx,
+            self.backend.clone(),
+            events,
+        ));
+        self.entries
+            .lock()
+            .unwrap()
+            .get_mut(&id)
+            .expect("legacy 条目刚插入")
+            .task = Some(task);
+        Ok(())
+    }
+
+    /// 落盘全部持久化隧道 (legacy 除外)
+    fn persist(&self) {
+        let Some(dir) = &self.dir else {
+            return;
+        };
+        let specs: Vec<TunnelSpec> = {
+            let entries = self.entries.lock().unwrap();
+            entries
+                .values()
+                .filter(|e| e.persisted)
+                .map(|e| e.spec.clone())
+                .collect()
+        };
+        if let Err(e) = store::save_tunnels(dir, &specs) {
+            // 持久化失败不阻断运行, 但必须可见 (下次启动列表会丢失)
+            eprintln!("[registry] tunnels.json 保存失败: {e}");
+        }
+    }
+}
+
+impl Default for Registry {
+    fn default() -> Self {
+        Self::new()
+    }
+}

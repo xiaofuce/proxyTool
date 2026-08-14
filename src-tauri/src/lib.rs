@@ -1,198 +1,353 @@
 //! GUI 薄桥接层 (Tauri v2)
 //!
 //! 隧道引擎在 `proxy-tool-core` crate (零 GUI 依赖); 本层职责仅剩:
-//! - Tauri 命令 (前端 invoke 入口) + AppState (会话槽/控制标志)
+//! - Tauri 命令 (前端 invoke 入口) + AppState (注册表 + 档案)
 //! - `TauriEmitter`: 把引擎事件 (TunnelEvents) 转发为 Tauri 事件给 WebView
-//! - 重连循环 (`run_with_reconnect`): 驱动 core 的连接函数并管理退避/终态
 //!
-//! 事件格式与旧版完全一致: `tunnel-status {kind,state,message?}` / `tunnel-log {kind,msg}`。
+//! 两套命令面并存 (P3 迁移期):
+//! - 旧三页 `connect_tunnel/connect_local/connect_dynamic`: 内部经
+//!   `Registry::start_legacy` 建立固定 id (= kind tag) 的临时隧道,
+//!   不落盘; 前端事件流 (kind 键控) 不变
+//! - 新命令 `tunnels_list/tunnel_create/tunnel_start/tunnel_stop/tunnel_delete`:
+//!   uuid id, 持久化 (tunnels.json), 供 P5 新 UI 使用
+//!
+//! 事件格式与旧版兼容 (新增 id 字段): `tunnel-status {id,kind,state,message?}` / `tunnel-log {id,kind,msg}`。
 
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
 
-use proxy_tool_core::{
-    direct, model::TunnelError, probe, profiles, socks, ssh, tunnel, TunnelEvents,
-};
+use proxy_tool_core::engine::{Registry, SshCreds};
+use proxy_tool_core::model::{Backend, ReconnectPolicy, TunnelKind, TunnelSpec, TunnelState};
+use proxy_tool_core::{probe, profiles, ssh, store, TunnelEvents};
 use serde::Serialize;
 use tauri::Manager;
 use tokio::sync::Mutex;
 
-/// 单条隧道的重连控制标志
-pub struct TunnelControl {
-    /// spawn 任务是否在运行 (true = 占用槽位, 用于防重复连接)
-    pub running: AtomicBool,
-    /// 用户主动请求断开 (true = 重连循环应停止, 不再重连)
-    pub disconnect_intent: AtomicBool,
-}
-
-impl TunnelControl {
-    pub const fn new() -> Self {
-        Self {
-            running: AtomicBool::new(false),
-            disconnect_intent: AtomicBool::new(false),
-        }
-    }
-}
-
-/// 共享应用状态: 每种隧道模式一个会话槽 + 服务器配置档案。
-/// 会话槽类型来自 core (引擎与 GUI 共享同一存放处)。
+/// 共享应用状态: 隧道注册表 + 服务器档案 (store v2)。
+/// 会话槽/重连循环/内置 SOCKS 生命周期都在 core 引擎里, 这里只持有注册表。
 pub struct AppState {
-    /// 反向隧道会话槽 (engine::tunnel 的 TunnelSlot)
-    pub remote_session: tunnel::TunnelSlot,
-    /// 本地转发会话槽
-    pub local_session: Arc<Mutex<Option<Arc<direct::DirectSession>>>>,
-    /// 动态隧道会话槽
-    pub dynamic_session: Arc<Mutex<Option<Arc<direct::DirectSession>>>>,
-    /// 反向隧道用内置 SOCKS5 服务器 (VPN 无端口时自动启动)
-    pub socks_server: Mutex<Option<Arc<socks::SocksServerHandle>>>,
-    /// 服务器配置档案
-    pub profiles: Mutex<Vec<profiles::ServerProfile>>,
-    /// 三种隧道的重连控制
-    pub ctrl_remote: TunnelControl,
-    pub ctrl_local: TunnelControl,
-    pub ctrl_dynamic: TunnelControl,
+    /// 隧道注册表 (持久化目录 = app_data_dir)
+    pub registry: Registry,
+    /// 档案存储 (v2: defaults + profiles; save/delete 经此落盘)
+    pub profile_store: Mutex<store::ProfileStore>,
 }
 
-/// 隧道状态事件负载: { kind, state, message? }
+/// 隧道状态事件负载: { id, kind, state, message? }
 #[derive(Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 struct StatusPayload {
-    kind: &'static str,
+    id: String,
+    kind: String,
     state: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     message: Option<String>,
 }
 
-/// 隧道日志事件负载: { kind, msg }
+/// 隧道日志事件负载: { id, kind, msg }
 #[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
 struct LogPayload {
-    kind: &'static str,
+    id: String,
+    kind: String,
     msg: String,
 }
 
-/// 引擎事件的 GUI 实现: 转发为 Tauri 事件 (前端 listen 的名字不变)
+/// 引擎事件的 GUI 实现: 转发为 Tauri 事件 (前端 listen 的名字不变)。
+/// id = 隧道 id (旧页面 = kind tag, 与 kind 同值; 新命令面 = uuid)。
 struct TauriEmitter(tauri::AppHandle);
 
 impl TunnelEvents for TauriEmitter {
-    fn status(&self, kind: &str, state: &str, message: Option<&str>) {
+    fn status(&self, id: &str, kind: &str, state: &str, message: Option<&str>) {
         use tauri::Emitter;
         let _ = self.0.emit(
             "tunnel-status",
             &StatusPayload {
-                kind: kind_static(kind),
-                state: state.to_string(),
-                message: message.map(|m| m.to_string()),
+                id: id.into(),
+                kind: kind.into(),
+                state: state.into(),
+                message: message.map(|m| m.into()),
             },
         );
     }
-    fn log(&self, kind: &str, msg: &str) {
+    fn log(&self, id: &str, kind: &str, msg: &str) {
         use tauri::Emitter;
         let _ = self.0.emit(
             "tunnel-log",
             &LogPayload {
-                kind: kind_static(kind),
-                msg: msg.to_string(),
+                id: id.into(),
+                kind: kind.into(),
+                msg: msg.into(),
             },
         );
     }
 }
 
-/// kind 字面量收窄回 'static (core 传 &str, 前端只认 remote/local/dynamic)
-fn kind_static(kind: &str) -> &'static str {
-    match kind {
-        "local" => "local",
-        "dynamic" => "dynamic",
-        _ => "remote",
-    }
+fn emitter(app: &tauri::AppHandle) -> Arc<dyn TunnelEvents> {
+    Arc::new(TauriEmitter(app.clone()))
 }
 
-/// 应用数据目录 (档案等持久化文件的根)
+/// 应用数据目录 (注册表/档案等持久化文件的根)
 fn data_dir(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
     app.path()
         .app_data_dir()
         .map_err(|e| format!("获取应用数据目录失败: {e}"))
 }
 
-/// 指数退避: 1→2→4→8→16→30→30…s (封顶 30s)
-fn next_backoff(cur: Duration) -> Duration {
-    std::cmp::min(cur * 2, Duration::from_secs(30))
+/// 日志便捷函数 (命令层直接发, 不经过引擎)
+fn events_log(app: &tauri::AppHandle, kind: &str, msg: &str) {
+    TauriEmitter(app.clone()).log(kind, kind, msg);
 }
 
-/// 退避等待 `dur`, 期间每 200ms 检查取消标志; 返回 true = 被用户取消
-async fn backoff_with_cancel(flag: &AtomicBool, dur: Duration) -> bool {
-    let mut waited = Duration::ZERO;
-    while waited < dur {
-        if flag.load(Ordering::SeqCst) {
-            return true;
-        }
-        let step = std::cmp::min(Duration::from_millis(200), dur - waited);
-        tokio::time::sleep(step).await;
-        waited += step;
-    }
-    flag.load(Ordering::SeqCst)
-}
+// ---------- 旧页面命令 (兼容适配, P5 移除) ----------
 
-/// 通用重连循环 (三种隧道共用): 反复执行 `attempt` —— 建立并运行一次隧道直到
-/// 断开 (返回 Ok) 或建连失败 (返回 Err)。失败按指数退避重试 (1→2→…→30s 封顶)。
-/// 停止条件 (三者满足其一):
-/// - 用户断开意图 (`disconnect_intent`, 点「断开」按钮)
-/// - `auto_reconnect` 为 false (复选框关闭)
-/// - 致命错误 (`!e.retryable()`, P1 起类型化决策): 认证被拒 / 本机端口被占 /
-///   服务器拒绝转发 —— 重连无法解决, 立即报错不进退避 (autossh GATETIME 语义)
-///
-/// `attempt` 闭包内自行管理会话槽 (连接成功时填入, 结束时清空) 并 emit "connected";
-/// 终态事件 (disconnected / error) 由本循环统一发射。
-async fn run_with_reconnect<F, Fut>(
-    events: Arc<dyn TunnelEvents>,
-    kind: &'static str,
-    intent: &AtomicBool,
+/// 命令: 建立反向隧道 (旧「反向隧道」页; 内部经注册表, 固定 id "remote")
+#[tauri::command]
+async fn connect_tunnel(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+    server_host: String,
+    server_port: u16,
+    username: String,
+    password: String,
+    remote_port: u32,
+    local_proxy_port: u16,
     auto_reconnect: bool,
-    mut attempt: F,
-) where
-    F: FnMut() -> Fut,
-    Fut: std::future::Future<Output = Result<(), TunnelError>>,
-{
-    let mut backoff = Duration::from_secs(1);
-    let mut n = 0u32;
-    loop {
-        // 循环顶检查: 覆盖「spawn 启动前用户已点断开」的窗口
-        if intent.load(Ordering::SeqCst) {
-            events.status(kind, "disconnected", None);
-            return;
-        }
-        let result = attempt().await;
-        if let Err(e) = &result {
-            events.log(kind, &format!("❌ {e}"));
-        }
-        let fatal = matches!(&result, Err(e) if !e.retryable());
-        if intent.load(Ordering::SeqCst) || !auto_reconnect || fatal {
-            match result {
-                Ok(()) => events.status(kind, "disconnected", None),
-                Err(e) => {
-                    let msg = if matches!(e, TunnelError::AuthRejected) {
-                        format!("{e} —— 已停止自动重连, 请检查用户名/密码后重新连接")
-                    } else {
-                        e.to_string()
-                    };
-                    events.status(kind, "error", Some(&msg));
-                }
-            }
-            return;
-        }
-        n += 1;
-        events.status(
-            kind,
-            "reconnecting",
-            Some(&format!("第 {n} 次重连, {}s 后重试", backoff.as_secs())),
-        );
-        if backoff_with_cancel(intent, backoff).await {
-            events.status(kind, "disconnected", None);
-            return;
-        }
-        backoff = next_backoff(backoff);
+) -> Result<(), String> {
+    let port: u16 = remote_port
+        .try_into()
+        .map_err(|_| format!("端口 {remote_port} 超出范围 (0-65535)"))?;
+    let spec = TunnelSpec {
+        id: "remote".into(), // 旧页面固定 id = kind tag
+        name: "反向隧道".into(),
+        enabled: false,
+        profile_id: "legacy".into(), // 临时隧道, 不落盘
+        kind: TunnelKind::Reverse {
+            bind: "127.0.0.1".into(),
+            port,
+        },
+        backend: Backend::SocksAuto {
+            fallback_port: local_proxy_port,
+        },
+        policy: ReconnectPolicy {
+            auto: auto_reconnect,
+            ..ReconnectPolicy::default()
+        },
+    };
+    let creds = SshCreds {
+        host: server_host,
+        port: server_port,
+        username,
+        password,
+    };
+    state
+        .registry
+        .start_legacy(spec, creds, emitter(&app))
+        .await
+}
+
+/// 命令: 断开反向隧道
+#[tauri::command]
+async fn disconnect_tunnel(state: tauri::State<'_, AppState>) -> Result<(), String> {
+    state.registry.stop("remote").await
+}
+
+/// 命令: 建立本地端口转发 (旧「本地转发」页; 固定 id "local")
+#[tauri::command]
+async fn connect_local(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+    server_host: String,
+    server_port: u16,
+    username: String,
+    password: String,
+    listen_port: u16,
+    target_host: String,
+    target_port: u16,
+    auto_reconnect: bool,
+) -> Result<(), String> {
+    let spec = TunnelSpec {
+        id: "local".into(),
+        name: "本地转发".into(),
+        enabled: false,
+        profile_id: "legacy".into(),
+        kind: TunnelKind::Local {
+            bind: "127.0.0.1".into(),
+            port: listen_port,
+            target_host,
+            target_port,
+        },
+        backend: Backend::default(),
+        policy: ReconnectPolicy {
+            auto: auto_reconnect,
+            ..ReconnectPolicy::default()
+        },
+    };
+    let creds = SshCreds {
+        host: server_host,
+        port: server_port,
+        username,
+        password,
+    };
+    state
+        .registry
+        .start_legacy(spec, creds, emitter(&app))
+        .await
+}
+
+/// 命令: 断开本地转发
+#[tauri::command]
+async fn disconnect_local(state: tauri::State<'_, AppState>) -> Result<(), String> {
+    state.registry.stop("local").await
+}
+
+/// 命令: 建立动态隧道 (旧「动态隧道」页; 固定 id "dynamic")
+#[tauri::command]
+async fn connect_dynamic(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+    server_host: String,
+    server_port: u16,
+    username: String,
+    password: String,
+    listen_port: u16,
+    auto_reconnect: bool,
+) -> Result<(), String> {
+    let spec = TunnelSpec {
+        id: "dynamic".into(),
+        name: "动态隧道".into(),
+        enabled: false,
+        profile_id: "legacy".into(),
+        kind: TunnelKind::Dynamic {
+            bind: "127.0.0.1".into(),
+            port: listen_port,
+        },
+        backend: Backend::default(),
+        policy: ReconnectPolicy {
+            auto: auto_reconnect,
+            ..ReconnectPolicy::default()
+        },
+    };
+    let creds = SshCreds {
+        host: server_host,
+        port: server_port,
+        username,
+        password,
+    };
+    state
+        .registry
+        .start_legacy(spec, creds, emitter(&app))
+        .await
+}
+
+/// 命令: 断开动态隧道
+#[tauri::command]
+async fn disconnect_dynamic(state: tauri::State<'_, AppState>) -> Result<(), String> {
+    state.registry.stop("dynamic").await
+}
+
+// ---------- 新命令面 (P5 新 UI 使用; 与旧并存) ----------
+
+/// 隧道 DTO (spec 展开 + 状态), 状态词汇与前端一致
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct TunnelDto {
+    #[serde(flatten)]
+    spec: TunnelSpec,
+    state: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    message: Option<String>,
+}
+
+fn state_to_dto(st: &TunnelState) -> (String, Option<String>) {
+    match st {
+        TunnelState::Stopped => ("disconnected".into(), None),
+        TunnelState::Starting => ("connecting".into(), None),
+        TunnelState::Running => ("connected".into(), None),
+        TunnelState::Backoff { attempt, wait_secs } => (
+            "reconnecting".into(),
+            Some(format!("第 {attempt} 次重连, {wait_secs}s 后重试")),
+        ),
+        TunnelState::Failed { message, .. } => ("error".into(), Some(message.clone())),
     }
 }
+
+/// 命令: 隧道列表 (spec + 状态)
+#[tauri::command]
+async fn tunnels_list(state: tauri::State<'_, AppState>) -> Result<Vec<TunnelDto>, String> {
+    Ok(state
+        .registry
+        .list()
+        .into_iter()
+        .map(|(spec, st)| {
+            let (state, message) = state_to_dto(&st);
+            TunnelDto {
+                spec,
+                state,
+                message,
+            }
+        })
+        .collect())
+}
+
+/// 命令: 新建隧道 (校验 + 持久化), 返回最新列表
+#[tauri::command]
+async fn tunnel_create(
+    state: tauri::State<'_, AppState>,
+    spec: TunnelSpec,
+) -> Result<Vec<TunnelDto>, String> {
+    state.registry.create(spec)?;
+    tunnels_list(state).await
+}
+
+/// 命令: 启动隧道 (按 spec.profile_id 查档案; 密码本次注入, 不落盘)
+#[tauri::command]
+async fn tunnel_start(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+    id: String,
+    password: String,
+) -> Result<(), String> {
+    let spec = state
+        .registry
+        .list()
+        .into_iter()
+        .find(|(s, _)| s.id == id)
+        .map(|(s, _)| s)
+        .ok_or_else(|| format!("隧道不存在: {id}"))?;
+    let profile = {
+        let store_guard = state.profile_store.lock().await;
+        store_guard
+            .profiles
+            .iter()
+            .find(|p| p.id == spec.profile_id)
+            .cloned()
+            .ok_or_else(|| format!("隧道关联的档案不存在 (id: {})", spec.profile_id))?
+    };
+    let creds = SshCreds {
+        host: profile.host,
+        port: profile.port,
+        username: profile.username,
+        password,
+    };
+    state.registry.start(&id, creds, emitter(&app)).await
+}
+
+/// 命令: 停止隧道
+#[tauri::command]
+async fn tunnel_stop(state: tauri::State<'_, AppState>, id: String) -> Result<(), String> {
+    state.registry.stop(&id).await
+}
+
+/// 命令: 删除隧道 (运行中先停止), 返回最新列表
+#[tauri::command]
+async fn tunnel_delete(
+    state: tauri::State<'_, AppState>,
+    id: String,
+) -> Result<Vec<TunnelDto>, String> {
+    state.registry.delete(&id).await?;
+    tunnels_list(state).await
+}
+
+// ---------- 既有单页命令 (保持) ----------
 
 /// 探测本地代理端口的结果
 #[derive(Serialize, Clone)]
@@ -212,307 +367,6 @@ async fn probe_local_proxy() -> Result<Vec<ProbeResultPayload>, String> {
             socks5_confirmed: r.socks5_confirmed,
         })
         .collect())
-}
-
-/// 确定本地 SOCKS 代理端口 (反向隧道用):
-/// 1. 优先复用 VPN 自带的端口 (探测确认是 SOCKS5)
-/// 2. 探测不到则启动内置 SOCKS5 服务器
-async fn resolve_local_proxy(app: &tauri::AppHandle, requested_port: u16) -> Result<u16, String> {
-    let vpn = probe::probe_local_proxy().await;
-    if let Some(found) = vpn.iter().find(|r| r.socks5_confirmed) {
-        events_log(
-            app,
-            "remote",
-            &format!(
-                "发现 VPN 自带 SOCKS 端口 {} (SOCKS5 确认), 直接复用",
-                found.port
-            ),
-        );
-        return Ok(found.port);
-    }
-
-    // 没有 VPN 端口 -> 启动内置 SOCKS5 服务器
-    let state = app.state::<AppState>();
-    let mut guard = state.socks_server.lock().await;
-    if let Some(server) = guard.as_ref() {
-        if server.port == requested_port {
-            // 已在监听同一端口, 复用
-            return Ok(server.port);
-        }
-        // 端口变了, 停掉旧的
-        server.stop();
-        *guard = None;
-    }
-    events_log(
-        app,
-        "remote",
-        &format!("未发现 VPN 代理端口, 启动内置 SOCKS5 服务器 (127.0.0.1:{requested_port})"),
-    );
-    let server = socks::start_socks_server(requested_port)
-        .await
-        .map_err(|e| e.to_string())?;
-    let port = server.port;
-    *guard = Some(server);
-    Ok(port)
-}
-
-/// 日志便捷函数 (命令层直接发, 不经过引擎)
-fn events_log(app: &tauri::AppHandle, kind: &'static str, msg: &str) {
-    TauriEmitter(app.clone()).log(kind, msg);
-}
-
-/// 命令: 建立反向隧道 (异步, 立即返回; 后台运行, 断开后按 auto_reconnect 自动重连)
-#[tauri::command]
-async fn connect_tunnel(
-    app: tauri::AppHandle,
-    state: tauri::State<'_, AppState>,
-    server_host: String,
-    server_port: u16,
-    username: String,
-    password: String,
-    remote_port: u32,
-    local_proxy_port: u16,
-    auto_reconnect: bool,
-) -> Result<(), String> {
-    // 防重: running 标志占用槽位 (true = 已在运行/重连中)
-    if state.ctrl_remote.running.swap(true, Ordering::SeqCst) {
-        return Err("已有反向隧道在运行, 请先断开".into());
-    }
-    state
-        .ctrl_remote
-        .disconnect_intent
-        .store(false, Ordering::SeqCst);
-
-    // 决定本地代理端口 (VPN 端口优先, 否则内置 SOCKS)
-    let local_proxy_port = resolve_local_proxy(&app, local_proxy_port).await?;
-
-    let cfg = tunnel::TunnelConfig {
-        server_host,
-        server_port,
-        username,
-        password,
-        remote_port,
-        local_proxy_host: "127.0.0.1".into(),
-        local_proxy_port,
-    };
-    let events: Arc<dyn TunnelEvents> = Arc::new(TauriEmitter(app.clone()));
-    events.status("remote", "connecting", None);
-
-    let slot = state.remote_session.clone();
-    let ev = events.clone();
-    let logger: ssh::Logger = Arc::new(move |msg: &str| ev.log("remote", msg));
-    let ev2 = events.clone();
-    let on_status: ssh::Logger = Arc::new(move |s: &str| ev2.status("remote", s, None));
-
-    // 后台任务: 重连循环 —— 反复建立隧道直到用户断开 / 认证被拒 / 关闭自动重连
-    tauri::async_runtime::spawn(async move {
-        let state2 = app.state::<AppState>();
-        let attempt = || {
-            let slot = slot.clone();
-            let cfg = cfg.clone();
-            let logger = logger.clone();
-            let on_status = on_status.clone();
-            async move {
-                // start_tunnel 内部建立会话并 emit "connected", 返回 = 会话结束
-                let r = tunnel::start_tunnel(slot.clone(), cfg, logger, on_status).await;
-                *slot.lock().await = None;
-                r
-            }
-        };
-        run_with_reconnect(
-            events.clone(),
-            "remote",
-            &state2.ctrl_remote.disconnect_intent,
-            auto_reconnect,
-            attempt,
-        )
-        .await;
-        *state2.remote_session.lock().await = None;
-        state2.ctrl_remote.running.store(false, Ordering::SeqCst);
-    });
-    Ok(())
-}
-
-/// 命令: 断开反向隧道 (置停止意图 + 关闭当前会话; 重连循环检测到意图后不再重连)
-#[tauri::command]
-async fn disconnect_tunnel(state: tauri::State<'_, AppState>) -> Result<(), String> {
-    state
-        .ctrl_remote
-        .disconnect_intent
-        .store(true, Ordering::SeqCst);
-    let mut guard = state.remote_session.lock().await;
-    if let Some(handle) = guard.take() {
-        // 发送 SSH DISCONNECT 真正关闭连接 (见 core::tunnel::close_session 注释)
-        tunnel::close_session(&handle).await;
-    }
-    Ok(())
-}
-
-/// 命令: 建立本地端口转发 (ssh -L); 断开后按 auto_reconnect 自动重连
-#[tauri::command]
-async fn connect_local(
-    app: tauri::AppHandle,
-    state: tauri::State<'_, AppState>,
-    server_host: String,
-    server_port: u16,
-    username: String,
-    password: String,
-    listen_port: u16,
-    target_host: String,
-    target_port: u16,
-    auto_reconnect: bool,
-) -> Result<(), String> {
-    if state.ctrl_local.running.swap(true, Ordering::SeqCst) {
-        return Err("本地转发已在运行, 请先断开".into());
-    }
-    state
-        .ctrl_local
-        .disconnect_intent
-        .store(false, Ordering::SeqCst);
-
-    let cfg = direct::DirectConfig {
-        server_host,
-        server_port,
-        username,
-        password,
-        listen_host: "127.0.0.1".into(),
-        listen_port,
-    };
-
-    let events: Arc<dyn TunnelEvents> = Arc::new(TauriEmitter(app.clone()));
-    events.status("local", "connecting", None);
-    let ev = events.clone();
-    let logger: ssh::Logger = Arc::new(move |msg: &str| ev.log("local", msg));
-
-    let slot = state.local_session.clone();
-    tauri::async_runtime::spawn(async move {
-        let state2 = app.state::<AppState>();
-        let attempt = || {
-            let slot = slot.clone();
-            let cfg = cfg.clone();
-            let target_host = target_host.clone();
-            let logger = logger.clone();
-            let events = events.clone();
-            async move {
-                match direct::run_local_forward(cfg, target_host, target_port, logger).await {
-                    Ok((session, task)) => {
-                        *slot.lock().await = Some(session);
-                        events.status("local", "connected", None);
-                        let _ = task.await; // 运行直到断开 (listener 随之 drop, 释放端口)
-                        *slot.lock().await = None;
-                        Ok(())
-                    }
-                    Err(e) => Err(e),
-                }
-            }
-        };
-        run_with_reconnect(
-            events.clone(),
-            "local",
-            &state2.ctrl_local.disconnect_intent,
-            auto_reconnect,
-            attempt,
-        )
-        .await;
-        *state2.local_session.lock().await = None;
-        state2.ctrl_local.running.store(false, Ordering::SeqCst);
-    });
-    Ok(())
-}
-
-/// 命令: 断开本地转发 (置停止意图 + 关闭会话)
-#[tauri::command]
-async fn disconnect_local(state: tauri::State<'_, AppState>) -> Result<(), String> {
-    state
-        .ctrl_local
-        .disconnect_intent
-        .store(true, Ordering::SeqCst);
-    if let Some(session) = state.local_session.lock().await.take() {
-        session.disconnect().await;
-    }
-    Ok(())
-}
-
-/// 命令: 建立动态隧道 (ssh -D); 断开后按 auto_reconnect 自动重连
-#[tauri::command]
-async fn connect_dynamic(
-    app: tauri::AppHandle,
-    state: tauri::State<'_, AppState>,
-    server_host: String,
-    server_port: u16,
-    username: String,
-    password: String,
-    listen_port: u16,
-    auto_reconnect: bool,
-) -> Result<(), String> {
-    if state.ctrl_dynamic.running.swap(true, Ordering::SeqCst) {
-        return Err("动态隧道已在运行, 请先断开".into());
-    }
-    state
-        .ctrl_dynamic
-        .disconnect_intent
-        .store(false, Ordering::SeqCst);
-
-    let cfg = direct::DirectConfig {
-        server_host,
-        server_port,
-        username,
-        password,
-        listen_host: "127.0.0.1".into(),
-        listen_port,
-    };
-
-    let events: Arc<dyn TunnelEvents> = Arc::new(TauriEmitter(app.clone()));
-    events.status("dynamic", "connecting", None);
-    let ev = events.clone();
-    let logger: ssh::Logger = Arc::new(move |msg: &str| ev.log("dynamic", msg));
-
-    let slot = state.dynamic_session.clone();
-    tauri::async_runtime::spawn(async move {
-        let state2 = app.state::<AppState>();
-        let attempt = || {
-            let slot = slot.clone();
-            let cfg = cfg.clone();
-            let logger = logger.clone();
-            let events = events.clone();
-            async move {
-                match direct::run_dynamic_forward(cfg, logger).await {
-                    Ok((session, task)) => {
-                        *slot.lock().await = Some(session);
-                        events.status("dynamic", "connected", None);
-                        let _ = task.await;
-                        *slot.lock().await = None;
-                        Ok(())
-                    }
-                    Err(e) => Err(e),
-                }
-            }
-        };
-        run_with_reconnect(
-            events.clone(),
-            "dynamic",
-            &state2.ctrl_dynamic.disconnect_intent,
-            auto_reconnect,
-            attempt,
-        )
-        .await;
-        *state2.dynamic_session.lock().await = None;
-        state2.ctrl_dynamic.running.store(false, Ordering::SeqCst);
-    });
-    Ok(())
-}
-
-/// 命令: 断开动态隧道 (置停止意图 + 关闭会话)
-#[tauri::command]
-async fn disconnect_dynamic(state: tauri::State<'_, AppState>) -> Result<(), String> {
-    state
-        .ctrl_dynamic
-        .disconnect_intent
-        .store(true, Ordering::SeqCst);
-    if let Some(session) = state.dynamic_session.lock().await.take() {
-        session.disconnect().await;
-    }
-    Ok(())
 }
 
 /// 命令: 验证反向隧道端到端可用性 (需已连接)。
@@ -535,7 +389,7 @@ async fn verify_remote_tunnel(
         &username,
         &password,
         &cmd,
-        Duration::from_secs(45),
+        std::time::Duration::from_secs(45),
     )
     .await?;
     events_log(&app, "remote", &format!("验证隧道:\n{out}"));
@@ -580,19 +434,21 @@ fi"#,
         &username,
         &password,
         &cmd,
-        Duration::from_secs(30),
+        std::time::Duration::from_secs(30),
     )
     .await?;
     events_log(&app, "remote", &format!("部署 proxy wrapper:\n{out}"));
     Ok(out)
 }
 
+// ---------- 档案命令 (v2 存储) ----------
+
 /// 命令: 列出服务器配置档案
 #[tauri::command]
 async fn list_profiles(
     state: tauri::State<'_, AppState>,
 ) -> Result<Vec<profiles::ServerProfile>, String> {
-    Ok(state.profiles.lock().await.clone())
+    Ok(state.profile_store.lock().await.profiles.clone())
 }
 
 /// 命令: 保存/更新服务器配置档案 (id 相同则覆盖), 返回最新列表
@@ -602,15 +458,14 @@ async fn save_profile(
     state: tauri::State<'_, AppState>,
     profile: profiles::ServerProfile,
 ) -> Result<Vec<profiles::ServerProfile>, String> {
-    let mut list = state.profiles.lock().await;
-    if let Some(p) = list.iter_mut().find(|p| p.id == profile.id) {
+    let mut store_guard = state.profile_store.lock().await;
+    if let Some(p) = store_guard.profiles.iter_mut().find(|p| p.id == profile.id) {
         *p = profile;
     } else {
-        list.push(profile);
+        store_guard.profiles.push(profile);
     }
-    let snapshot = list.clone();
-    profiles::save(&data_dir(&app)?, &snapshot)?;
-    Ok(snapshot)
+    store::save_profiles(&data_dir(&app)?, &store_guard)?;
+    Ok(store_guard.profiles.clone())
 }
 
 /// 命令: 删除服务器配置档案, 返回最新列表
@@ -620,32 +475,42 @@ async fn delete_profile(
     state: tauri::State<'_, AppState>,
     id: String,
 ) -> Result<Vec<profiles::ServerProfile>, String> {
-    let mut list = state.profiles.lock().await;
-    list.retain(|p| p.id != id);
-    let snapshot = list.clone();
-    profiles::save(&data_dir(&app)?, &snapshot)?;
-    Ok(snapshot)
+    let mut store_guard = state.profile_store.lock().await;
+    store_guard.profiles.retain(|p| p.id != id);
+    store::save_profiles(&data_dir(&app)?, &store_guard)?;
+    Ok(store_guard.profiles.clone())
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
-        .manage(AppState {
-            remote_session: Arc::new(Mutex::new(None)),
-            local_session: Arc::new(Mutex::new(None)),
-            dynamic_session: Arc::new(Mutex::new(None)),
-            socks_server: Mutex::new(None),
-            profiles: Mutex::new(Vec::new()),
-            ctrl_remote: TunnelControl::new(),
-            ctrl_local: TunnelControl::new(),
-            ctrl_dynamic: TunnelControl::new(),
-        })
         .setup(|app| {
-            // 加载服务器配置档案 (存储目录 = app_data_dir)
+            // app_data_dir 需要已初始化的 app handle, 故状态在 setup 里构建 + manage
+            // (setup 在 WebView 加载与任何 invoke 之前运行, 命令拿到的 State 必已就绪)
             let dir =
                 data_dir(app.handle()).map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
-            let loaded = profiles::load(&dir);
-            *app.state::<AppState>().profiles.blocking_lock() = loaded;
+            std::fs::create_dir_all(&dir)
+                .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
+
+            // 档案: v1 (裸数组) 首启动自动迁移到 v2, 旧档案无损带入
+            let profile_store = store::load_profiles(&dir);
+            if store::migrate_needed(&dir) {
+                store::save_profiles(&dir, &profile_store)
+                    .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
+                println!("[setup] profiles.json 已迁移到 v2");
+            }
+
+            // 隧道列表: 恢复配置 (凭据不落盘, 不自动启动)
+            let registry = Registry::persistent(dir);
+            let restored = registry.restore();
+            if !restored.is_empty() {
+                println!("[setup] 已恢复 {} 条隧道配置", restored.len());
+            }
+
+            app.manage(AppState {
+                registry,
+                profile_store: Mutex::new(profile_store),
+            });
             Ok(())
         })
         .plugin(tauri_plugin_opener::init())
@@ -659,6 +524,11 @@ pub fn run() {
             disconnect_dynamic,
             verify_remote_tunnel,
             deploy_wrapper,
+            tunnels_list,
+            tunnel_create,
+            tunnel_start,
+            tunnel_stop,
+            tunnel_delete,
             list_profiles,
             save_profile,
             delete_profile,

@@ -6,6 +6,8 @@
 //!
 //! - `tunnel`: 反向隧道 (ssh -R) 引擎组装 —— 传输实现 (标准/兼容) 在 `transport`
 //! - `direct`: 本地转发 (ssh -L) 与动态隧道 (ssh -D)
+//! - `engine`: 隧道注册表 + 每隧道状态机任务 (L2, 重连在此)
+//! - `backend`: 反向隧道的本地落地解析 (Tcp / SocksAuto: VPN 探测 + 内置 SOCKS)
 //! - `ssh`: 连接/密码认证/远程执行 (三种模式共用)
 //! - `socks`: 内置 SOCKS5 服务器 (连接器可插拔: Plain / 经 SSH)
 //! - `probe`: 本机代理端口探测 (VPN 无关化)
@@ -13,8 +15,10 @@
 //! - `store`: 档案 + 隧道列表持久化 (JSON, 路径可注入, v1→v2 迁移)
 //! - `creds`: 测试/调试凭据 (环境变量或 gitignored 本地文件)
 
+pub mod backend;
 pub mod creds;
 pub mod direct;
+pub mod engine;
 pub mod model;
 pub mod probe;
 pub mod profiles;
@@ -28,12 +32,12 @@ pub mod tunnel;
 /// GUI 实现: 转发为 Tauri 事件 (tunnel-status / tunnel-log);
 /// 测试实现: 收集到 Vec 断言事件序列。
 ///
-/// P0 阶段 kind/state 仍是字符串 (与现有前端事件格式一一对应, 见 src-tauri),
-/// P3 引入隧道注册表后演进为类型化状态。
+/// `id` 标识隧道 (新命令面 = uuid; 旧页面适配 = 形态 tag, 见 engine::Registry::start_legacy)。
+/// `kind` = 形态 tag (remote/local/dynamic), 迁移期与现有前端事件字段一一对应。
 pub trait TunnelEvents: Send + Sync + 'static {
     /// 隧道状态变化。
     /// state: connecting / connected / reconnecting / disconnected / error
-    fn status(&self, kind: &str, state: &str, message: Option<&str>);
+    fn status(&self, id: &str, kind: &str, state: &str, message: Option<&str>);
     /// 日志一行
-    fn log(&self, kind: &str, msg: &str);
+    fn log(&self, id: &str, kind: &str, msg: &str);
 }
