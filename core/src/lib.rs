@@ -19,6 +19,7 @@ pub mod probe;
 pub mod profiles;
 pub mod socks;
 pub mod ssh;
+pub mod transport;
 pub mod tunnel;
 
 /// 引擎 → 外部世界的事件出口。

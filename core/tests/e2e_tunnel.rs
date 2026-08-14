@@ -68,8 +68,12 @@ async fn connect_exec_handle() -> Arc<tokio::sync::Mutex<client::Handle<ExecHand
     Arc::new(tokio::sync::Mutex::new(session))
 }
 
-/// 在服务器上执行命令 (经独立连接), 返回 stdout (带 30s 超时)
-async fn exec(handle: &Arc<tokio::sync::Mutex<client::Handle<ExecHandler>>>, cmd: &str) -> String {
+/// 在服务器上执行命令 (经独立连接), 自定义超时
+async fn exec_timeout(
+    handle: &Arc<tokio::sync::Mutex<client::Handle<ExecHandler>>>,
+    cmd: &str,
+    timeout: Duration,
+) -> String {
     let chan = handle
         .lock()
         .await
@@ -79,11 +83,16 @@ async fn exec(handle: &Arc<tokio::sync::Mutex<client::Handle<ExecHandler>>>, cmd
     chan.exec(true, cmd).await.expect("发送 exec 请求");
     let mut stream = chan.into_stream();
     let mut out = String::new();
-    tokio::time::timeout(Duration::from_secs(30), stream.read_to_string(&mut out))
+    tokio::time::timeout(timeout, stream.read_to_string(&mut out))
         .await
         .expect("读取命令输出超时")
         .expect("读取命令输出失败");
     out
+}
+
+/// 在服务器上执行命令 (经独立连接), 返回 stdout (30s 超时, 快命令/诊断用)
+async fn exec(handle: &Arc<tokio::sync::Mutex<client::Handle<ExecHandler>>>, cmd: &str) -> String {
+    exec_timeout(handle, cmd, Duration::from_secs(30)).await
 }
 
 /// 诊断用: 执行命令但不因超时 panic, 返回 (已有输出, 是否超时)
@@ -525,17 +534,24 @@ timeout 25 curl -v --connect-timeout 5 -x socks5h://127.0.0.1:1081 https://www.g
     )
     .await;
     println!("--- 第二个独立请求 ---\n{again}");
-    // 注: 本地 VPN (v2cloud 端口模式) 的 7892 端口自身不稳定 (本机直连亦复现:
-    // 连续访问 https google 前两次失败第三次成功), 故对目标请求做重试,
-    // 与真实用户行为一致。隧道本身的多连接无损性由 session_mode_multi_conn 验证。
-    let via = exec(
+    // 注 1: 本地 VPN (v2cloud 端口模式) 的 7892 端口自身不稳定 (本机直连亦复现:
+    // 连续访问 https google 前两次失败第三次成功), 故对目标请求做重试。
+    // 重试循环最坏 5×(30+2)s, exec 超时须与之匹配 (曾因 30s 硬超时在 VPN
+    // 低迷期截断重试循环, 误报隧道失败)。隧道本身的多连接无损性由
+    // session_mode_multi_conn 验证。
+    // 注 2: 判定标准 = 拿到真实 HTTP 状态码 (非 000)。google 对 VPN 出口 IP
+    // 常做地区重定向 (302 → google.com.hk), 重定向链有时止步于 302 ——
+    // 本机直经 VPN 亦复现, 与隧道无关; 任何非 000 状态码都证明
+    // 服务器 → 隧道 → 本机 VPN → google 的完整链路 (TCP+TLS+HTTP) 可用。
+    let via = exec_timeout(
         &exec_h,
         "for i in 1 2 3 4 5; do
   code=$(curl -sL -o /dev/null --connect-timeout 20 --max-time 30 -x socks5h://127.0.0.1:1081 -w '%{http_code}' https://www.google.com)
   echo \"尝试 $i: $code\"
-  if [ \"$code\" = 200 ]; then echo VIA_OK; break; fi
+  if [ \"$code\" != 000 ] && [ -n \"$code\" ]; then echo VIA_OK; break; fi
   sleep 2
 done",
+        Duration::from_secs(200),
     )
     .await;
     println!("--- 经隧道访问 google (跟随重定向, 最多5次) ---\n{via}");

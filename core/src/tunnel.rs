@@ -29,6 +29,7 @@ use tokio::io::{copy_bidirectional, AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
 use crate::model::TunnelError;
+use crate::transport::frame::{self, Frame, FrameParser};
 
 /// 隧道连接配置
 #[derive(Debug, Clone)]
@@ -294,60 +295,36 @@ pub async fn run_tunnel_session(
 
         // 标记帧: 触发并吸收本机->服务器方向 (sshd 写 helper stdin) 的首次注入。
         // helper 以"跳过注入"状态开始, 会丢弃标记帧前的注入数据。
-        if chan_w.write_all(&MARKER).await.is_err() {
+        if chan_w.write_all(&frame::MARKER).await.is_err() {
             (logger2)("写标记帧失败");
             return;
         }
         (logger2)("已发送标记帧 (吸收服务器端写注入)");
 
-        // 帧读取任务: 通道字节流 -> 帧 -> 队列
-        // 服务器端组件 (libonion) 注入 sshd 的每次写通道, 注入转储 (帧格式,
-        // 含流量副本, 无法与真实帧区分) 前置在每次写的数据前。双方 (helper
-        // 与本机) 每个写单元 = [标记帧][帧], 解析器用部分帧状态机:
-        // - 有未完成帧 (partial): 直接补齐 — 帧尾残余是真实数据, 不可能是注入;
-        // - 无未完成帧: 扫描标记帧, 丢弃其前的一切 — 此刻只可能是注入转储。
-        // 标记帧 (长度 8 的帧, 数据 DEADBEEF×2) 在任何状态下无条件丢弃。
-        // 帧 = [u32 BE 长度][u32 BE CRC32][数据]; 结束帧 = [00000004][crc][DEADBEEF]
-        // (非零编码, 与 libonion 空审计记录 [00000000] 区分)。
-        // 实测: libonion 注入大写入时 sshd 的通道写被截断 (~16KB 内部缓冲),
-        // 注入转储(前次写入的流量副本) + 帧超过 16KB 时帧尾随机丢失。
-        // 防护: (1) helper 的 stdout 写入按 4KB 分块 (见 HELPER_PY), 转储+帧
-        // 恒 < 16KB, 从根源避免截断; (2) CRC 校验检测残留的损坏帧, 损坏时
-        // 丢弃该连接 (发 End, 上层 SOCKS 客户端自动重试) 并重置同步;
-        // (3) partial 长期不补齐 (尾部丢失) 时超时重置, 防止解析器卡死。
+        // 帧读取任务: 通道字节流 -> 帧 -> 队列。
+        // 帧协议 (标记帧/CRC/分块/注入同步) 在 transport::frame, 独立单测覆盖;
+        // 此任务只做 IO: 读通道 -> feed 解析器 -> 转发帧给转发循环,
+        // 以及 partial 超时 (帧尾丢失, 注入截断) 的计时与重置。
         let logger3 = logger2.clone();
         let pt_dump = std::env::var("PT_DUMP").is_ok();
-        let pdump = move |logger: &Logger, msg: &str| {
-            if pt_dump {
-                logger(&msg.to_string());
-            }
-        };
         tokio::spawn(async move {
-            let mut buf: Vec<u8> = Vec::new();
+            let mut parser = FrameParser::new();
             let mut tmp = [0u8; 16384];
-            let mut partial: Option<usize> = None;
             let mut partial_since: Option<tokio::time::Instant> = None;
             let partial_timeout = std::time::Duration::from_secs(5);
-            // 同步状态: false = 未同步, 扫描标记帧并丢弃其前的一切 (注入);
-            // true = 刚消费标记帧, 头部必然是帧 (结束帧/连续标记帧/数据帧)。
-            // 注入会复制前次写入的标记帧 (产生 [M][M][f1][M][f2] 布局),
-            // 若同步后仍按"扫描标记"处理, 会把标记之间的真实数据帧当注入丢弃。
-            let mut synced = false;
             loop {
-                if let (Some(plen), Some(since)) = (partial, partial_since) {
+                // partial 计时: 首次观察到未完成帧时起表, 补齐即重置
+                if parser.partial_pending() {
+                    let since = *partial_since.get_or_insert_with(tokio::time::Instant::now);
                     if since.elapsed() > partial_timeout {
-                        // 帧尾丢失 (注入截断): 无法恢复该帧, 关闭当前连接,
-                        // 上层重试; 丢弃缓冲重新同步
-                        (logger3)(&format!(
-                            "帧 {plen} 字节不完整超时 (注入截断), 丢弃连接并重置同步"
-                        ));
-                        partial = None;
                         partial_since = None;
-                        buf.clear();
+                        parser.on_partial_timeout(|m| (logger3)(m));
                         if tx.send(FrameMsg::End).await.is_err() {
                             return;
                         }
                     }
+                } else {
+                    partial_since = None;
                 }
                 match chan_r.read(&mut tmp).await {
                     Ok(0) | Err(_) => {
@@ -355,156 +332,21 @@ pub async fn run_tunnel_session(
                         break;
                     }
                     Ok(n) => {
-                        buf.extend_from_slice(&tmp[..n]);
                         if pt_dump {
-                            let hex = |b: &[u8]| -> String {
-                                b.iter().map(|x| format!("{x:02x}")).collect::<String>()
-                            };
-                            let head: String =
-                                buf.iter().take(24).map(|x| format!("{x:02x}")).collect();
-                            let tail: String = buf
+                            let head: String = tmp[..n]
                                 .iter()
-                                .skip(buf.len().saturating_sub(16))
+                                .take(24)
                                 .map(|x| format!("{x:02x}"))
                                 .collect();
-                            let _ = hex;
-                            (logger3)(&format!(
-                                "READ n={n} buf={} head={head} tail={tail}",
-                                buf.len()
-                            ));
+                            (logger3)(&format!("READ n={n} head={head}"));
                         }
-                        loop {
-                            // 部分帧: 直接补齐 (帧尾残余是真实数据)
-                            if let Some(plen) = partial {
-                                pdump(&logger3, &format!("PARTIAL plen={plen} buf={}", buf.len()));
-                                if buf.len() < 8 + plen {
-                                    break;
-                                }
-                                if plen == 8 && buf[4..12] == MARKER[4..] {
-                                    // 标记帧残片补齐后判定为同步点, 丢弃
-                                    buf.drain(..12);
-                                    partial = None;
-                                    partial_since = None;
-                                    continue;
-                                }
-                                if plen == 4 && buf[8..12] == END_PAYLOAD {
-                                    // 结束帧残片补齐 (拆批到达的 [00000004][crc][DEADBEEF])
-                                    buf.drain(..12);
-                                    partial = None;
-                                    partial_since = None;
-                                    synced = false;
-                                    if tx.send(FrameMsg::End).await.is_err() {
-                                        return;
-                                    }
-                                    continue;
-                                }
-                                if !frame_crc_ok(&buf, plen) {
-                                    // 注入截断导致数据损坏: 丢连接 + 重置同步
-                                    (logger3)("CRC 校验失败 (注入截断), 丢弃连接并重置同步");
-                                    partial = None;
-                                    partial_since = None;
-                                    buf.clear();
-                                    synced = false;
-                                    if tx.send(FrameMsg::End).await.is_err() {
-                                        return;
-                                    }
-                                    break;
-                                }
-                                let payload = buf[8..8 + plen].to_vec();
-                                buf.drain(..8 + plen);
-                                partial = None;
-                                partial_since = None;
-                                synced = false;
-                                if tx.send(FrameMsg::Payload(payload)).await.is_err() {
-                                    return;
-                                }
-                                continue;
-                            }
-                            // 结束帧 = [00 00 00 04][crc32][DE AD BE EF] (12 字节)。
-                            // 必须先于标记帧扫描处理: 若滞后, 下一次扫描找到后续标记帧
-                            // 后 drain 其前的一切, 会把滞留在缓冲中的结束帧误当注入
-                            // 丢弃, 当前连接收不到 End, 后续连接的帧全部串入前一连接。
-                            // 注意: 结束帧不得用 [00000000] 编码 —— libonion 的空审计
-                            // 记录就是 [00000000], 二者字节完全相同且相邻标记帧布局
-                            // 一致 (空记录后随帧标记, 结束帧后随下一连接的接受标记),
-                            // 无法区分; 空记录被扫描吸收 (丢弃标记帧前的一切)。
-                            if buf.len() >= 12
-                                && u32::from_be_bytes(buf[..4].try_into().unwrap()) == 4
-                                && buf[8..12] == END_PAYLOAD
-                            {
-                                buf.drain(..12);
-                                if tx.send(FrameMsg::End).await.is_err() {
-                                    return;
-                                }
-                                pdump(&logger3, "EMIT End (完整 12 字节)");
-                                continue;
-                            }
-                            if synced {
-                                // 已同步 (刚消费过标记帧): 头部必须是帧 —
-                                // 结束帧 / 另一个标记帧 / 数据帧。绝不在此扫描
-                                // 标记帧: 标记帧之间是真实数据, 扫描会把它当注入
-                                // 丢弃 (旧 bug: [M][M][f1][M][f2] 中 f1 丢失)。
-                                if buf.len() < 8 {
-                                    break;
-                                }
-                                let len = u32::from_be_bytes(buf[..4].try_into().unwrap()) as usize;
-                                if len == 0 {
-                                    // 空审计记录残留: 丢弃 (结束帧不再是零长度编码)
-                                    buf.drain(..4);
-                                    pdump(&logger3, "DROP 空记录 len=0");
-                                    continue;
-                                }
-                                if len == 8 && buf.len() >= 12 && buf[4..12] == MARKER[4..] {
-                                    // 连续标记帧 (注入副本 + 真实标记): 丢弃, 保持同步
-                                    buf.drain(..12);
-                                    pdump(&logger3, "DROP 连续标记帧 (保持同步)");
-                                    continue;
-                                }
-                                if buf.len() < 8 + len {
-                                    partial = Some(len);
-                                    partial_since = Some(tokio::time::Instant::now());
-                                    pdump(&logger3, &format!("PARTIAL set len={len}"));
-                                    break;
-                                }
-                                if !frame_crc_ok(&buf, len) {
-                                    // 注入截断导致数据损坏: 丢连接 + 重置同步
-                                    (logger3)(&format!(
-                                        "CRC 校验失败 (注入截断, 帧 {len} 字节), 丢弃连接并重置同步"
-                                    ));
-                                    buf.drain(..8 + len);
-                                    if tx.send(FrameMsg::End).await.is_err() {
-                                        return;
-                                    }
-                                    synced = false;
-                                    continue;
-                                }
-                                let payload = buf[8..8 + len].to_vec();
-                                buf.drain(..8 + len);
-                                if tx.send(FrameMsg::Payload(payload)).await.is_err() {
-                                    return;
-                                }
-                                pdump(&logger3, &format!("EMIT Payload {len}"));
-                                synced = false;
-                                continue;
-                            }
-                            // 未同步: 扫描标记帧, 丢弃其前的一切 (注入)
-                            match find_marker(&buf) {
-                                None => {
-                                    // 只保留可能跨批的标记帧尾部
-                                    let keep = MARKER.len() - 1;
-                                    if buf.len() > keep {
-                                        buf.drain(..buf.len() - keep);
-                                    }
-                                    pdump(&logger3, &format!("SCAN none keep (buf={})", buf.len()));
-                                    break;
-                                }
-                                Some(pos) => {
-                                    pdump(&logger3, &format!("SCAN pos={pos} (buf={})", buf.len()));
-                                    buf.drain(..pos + MARKER.len());
-                                    synced = true;
-                                    // 回到循环顶部: 标记帧后可能是结束帧
-                                    // (顶部检查), 也可能是数据帧 (synced 分支)
-                                }
+                        for fr in parser.feed_with(&tmp[..n], |m| (logger3)(m)) {
+                            let msg = match fr {
+                                Frame::Payload(p) => FrameMsg::Payload(p),
+                                Frame::End => FrameMsg::End,
+                            };
+                            if tx.send(msg).await.is_err() {
+                                return;
                             }
                         }
                     }
@@ -514,6 +356,12 @@ pub async fn run_tunnel_session(
         });
 
         // 转发循环: 每个连接: 首帧到达 -> 连本地代理 -> 双向转发 -> 结束帧 -> 下一连接
+        let pt_dump = std::env::var("PT_DUMP").is_ok();
+        let pdump = move |logger: &Logger, msg: &str| {
+            if pt_dump {
+                logger(&msg.to_string());
+            }
+        };
         'outer: loop {
             // 等待连接首帧
             let first = match rx.recv().await {
@@ -590,32 +438,22 @@ pub async fn run_tunnel_session(
                     m = rx_local.recv() => match m {
                         Some(LocalMsg::Data(d)) => {
                             pdump(&logger2, &format!("FWD#{fwd_step} local Data {}", d.len()));
-                            // 每个写单元 = [标记帧][帧]: 注入转储前置在每次
-                            // 写的数据前, helper 的解析器丢弃标记帧前的一切。
-                            // 帧 = [长度][CRC32][数据], helper 端校验 CRC。
+                            // 每个写单元 = [标记帧][帧] (frame::encode_payload):
+                            // 注入转储前置在每次写的数据前, helper 的解析器
+                            // 丢弃标记帧前的一切, 帧校验 CRC。
                             // 注: 本机->服务器方向实测无注入 (sshd 写管道不被
                             // 审计), 此处无需分块; 大帧由 helper 的 feed 状态机
                             // 与 5s partial 超时兜底。
-                            let mut f = Vec::with_capacity(MARKER.len() + 8 + d.len());
-                            f.extend_from_slice(&MARKER);
-                            f.extend_from_slice(&(d.len() as u32).to_be_bytes());
-                            f.extend_from_slice(&crc32(&d).to_be_bytes());
-                            f.extend_from_slice(&d);
-                            if chan_w.write_all(&f).await.is_err() {
+                            if chan_w.write_all(&frame::encode_payload(&d)).await.is_err() {
                                 break 'outer;
                             }
                             (logger2)(&format!("回写帧 {} 字节", d.len()));
                         }
                         Some(LocalMsg::Closed) | None => {
-                            // 本地连接结束 -> 发送结束帧 ([00000004][crc][DEADBEEF],
+                            // 本地连接结束 -> 发送结束帧 (frame::encode_end,
                             // 非零编码, 与 libonion 空审计记录区分)
                             (logger2)("本地代理连接结束, 发送结束帧");
-                            let mut f = Vec::with_capacity(MARKER.len() + 12);
-                            f.extend_from_slice(&MARKER);
-                            f.extend_from_slice(&4u32.to_be_bytes());
-                            f.extend_from_slice(&crc32(&END_PAYLOAD).to_be_bytes());
-                            f.extend_from_slice(&END_PAYLOAD);
-                            if chan_w.write_all(&f).await.is_err() {
+                            if chan_w.write_all(&frame::encode_end()).await.is_err() {
                                 break 'outer;
                             }
                             closed = true;
@@ -654,42 +492,10 @@ pub async fn run_tunnel_session(
 /// 避免截断。CRC32 校验 (与 python zlib.crc32 一致) 检测残余损坏帧, 损坏时发 End
 /// 丢弃该连接 (上层 SOCKS 客户端自动重试); partial 5s 不补齐则超时重置。
 /// 注意: 脚本内禁止使用单引号 (经 bash -c 传递)。
-const MARKER: [u8; 12] = [
-    0x00, 0x00, 0x00, 0x08, 0xDE, 0xAD, 0xBE, 0xEF, 0xDE, 0xAD, 0xBE, 0xEF,
-];
-
-/// 结束帧载荷 (非零, 与 libonion 空审计记录 [00000000] 区分)。
-/// 结束帧 = [00 00 00 04][crc32(END_PAYLOAD)][END_PAYLOAD] (12 字节, 前带标记帧)。
-const END_PAYLOAD: [u8; 4] = [0xDE, 0xAD, 0xBE, 0xEF];
-
-/// 在 buf 中查找标记帧位置 (用于跳过注入模式)
-fn find_marker(buf: &[u8]) -> Option<usize> {
-    buf.windows(MARKER.len()).position(|w| w == MARKER)
-}
-
-/// 标准 CRC32 (与 python zlib.crc32 一致), 帧校验用。
-/// 帧格式: [u32 BE 长度][u32 BE CRC32][数据]。
-fn crc32(data: &[u8]) -> u32 {
-    let mut crc: u32 = 0xFFFF_FFFF;
-    for &b in data {
-        crc ^= b as u32;
-        for _ in 0..8 {
-            let mask = (crc & 1).wrapping_neg();
-            crc = (crc >> 1) ^ (0xEDB8_8320 & mask);
-        }
-    }
-    !crc
-}
-
-/// 校验 buf 头部是否构成完整合法帧: [长度][CRC32][数据] 且 CRC 匹配
-fn frame_crc_ok(buf: &[u8], len: usize) -> bool {
-    if buf.len() < 8 + len {
-        return false;
-    }
-    let crc = u32::from_be_bytes(buf[4..8].try_into().unwrap());
-    crc32(&buf[8..8 + len]) == crc
-}
-
+/// 帧协议常量 (MARKER/END_PAYLOAD)、编解码 (encode_payload/encode_end) 与解析
+/// 状态机 (FrameParser) 已抽出至 `transport::frame` (独立单测覆盖); 本文件只保留
+/// 服务器侧 python3 对称实现 (HELPER_PY) 与通道 IO 编排。
+///
 /// helper 启动后: 预热自连 -> 写标记帧。**每个连接的数据前都写标记帧**: 注入
 /// 转储可能分批到达且包含流量副本, 与真实帧无法区分, 本机端以"跳过注入"模式
 /// 丢弃标记帧之前的一切字节。读 stdin 时同样先跳过注入直到本机发来的标记帧。
