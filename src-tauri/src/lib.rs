@@ -17,7 +17,7 @@ use std::sync::Arc;
 
 use proxy_tool_core::engine::{Registry, SshCreds};
 use proxy_tool_core::model::{Backend, ReconnectPolicy, TunnelKind, TunnelSpec, TunnelState};
-use proxy_tool_core::{probe, profiles, ssh, store, TunnelEvents};
+use proxy_tool_core::{presets, probe, profiles, ssh, store, TunnelEvents};
 use serde::Serialize;
 use tauri::Manager;
 use tokio::sync::Mutex;
@@ -337,6 +337,12 @@ async fn tunnel_stop(state: tauri::State<'_, AppState>, id: String) -> Result<()
     state.registry.stop(&id).await
 }
 
+/// 命令: 立即重试 (Backoff 等待期间跳过剩余等待, autossh SIGHUP 语义)
+#[tauri::command]
+async fn tunnel_retry_now(state: tauri::State<'_, AppState>, id: String) -> Result<(), String> {
+    state.registry.retry_now(&id)
+}
+
 /// 命令: 删除隧道 (运行中先停止), 返回最新列表
 #[tauri::command]
 async fn tunnel_delete(
@@ -345,6 +351,43 @@ async fn tunnel_delete(
 ) -> Result<Vec<TunnelDto>, String> {
     state.registry.delete(&id).await?;
     tunnels_list(state).await
+}
+
+// ---------- 场景预设 (P5 新 UI 向导用) ----------
+
+/// 预设 DTO (UI 向导卡片)
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct PresetDto {
+    id: String,
+    name: String,
+    description: String,
+    /// 场景专属动作 id (vpn_share: verify_internet / deploy_wrapper)
+    actions: Vec<String>,
+}
+
+/// 命令: 场景预设列表 (选预设卡片 → 表单)
+#[tauri::command]
+fn presets_list() -> Vec<PresetDto> {
+    presets::list()
+        .into_iter()
+        .map(|p| PresetDto {
+            id: p.id.into(),
+            name: p.name.into(),
+            description: p.description.into(),
+            actions: p.actions.iter().map(|a| a.to_string()).collect(),
+        })
+        .collect()
+}
+
+/// 命令: 按预设生成隧道模板 (表单预填; 用户改端口/目标后 tunnel_create)
+#[tauri::command]
+fn tunnel_from_preset(
+    preset_id: String,
+    name: String,
+    profile_id: String,
+) -> Result<TunnelSpec, String> {
+    presets::template(&preset_id, &name, &profile_id)
 }
 
 // ---------- 既有单页命令 (保持) ----------
@@ -528,7 +571,10 @@ pub fn run() {
             tunnel_create,
             tunnel_start,
             tunnel_stop,
+            tunnel_retry_now,
             tunnel_delete,
+            presets_list,
+            tunnel_from_preset,
             list_profiles,
             save_profile,
             delete_profile,

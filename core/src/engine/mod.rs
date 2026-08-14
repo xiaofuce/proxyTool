@@ -90,6 +90,8 @@ struct Entry {
     /// (状态会永远停在初值 —— 曾踩过的坑), 注册表查询也用它快照
     state_rx: watch::Receiver<TunnelState>,
     stop: Arc<AtomicBool>,
+    /// 「立即重试」请求 (Backoff 等待期间置位, 状态机跳过剩余等待)
+    retry_now: Arc<AtomicBool>,
     slot: SessionSlot,
     task: Option<tokio::task::JoinHandle<()>>,
 }
@@ -113,6 +115,7 @@ fn new_entry_parts(spec: &TunnelSpec, persisted: bool) -> Entry {
         state_tx,
         state_rx,
         stop: Arc::new(AtomicBool::new(false)),
+        retry_now: Arc::new(AtomicBool::new(false)),
         slot: SessionSlot::new(spec),
         task: None,
     }
@@ -122,7 +125,8 @@ fn new_entry_parts(spec: &TunnelSpec, persisted: bool) -> Entry {
 /// `dir = None` 时不持久化 (测试用)。
 pub struct Registry {
     dir: Option<PathBuf>,
-    entries: Mutex<HashMap<String, Entry>>,
+    /// Arc 包裹: 端口回填回调 (状态机任务触发) 需要跨任务访问条目表
+    entries: Arc<Mutex<HashMap<String, Entry>>>,
     backend: Arc<BackendPool>,
 }
 
@@ -131,7 +135,7 @@ impl Registry {
     pub fn new() -> Self {
         Self {
             dir: None,
-            entries: Mutex::new(HashMap::new()),
+            entries: Arc::new(Mutex::new(HashMap::new())),
             backend: Arc::new(BackendPool::new()),
         }
     }
@@ -140,7 +144,7 @@ impl Registry {
     pub fn persistent(dir: PathBuf) -> Self {
         Self {
             dir: Some(dir),
-            entries: Mutex::new(HashMap::new()),
+            entries: Arc::new(Mutex::new(HashMap::new())),
             backend: Arc::new(BackendPool::new()),
         }
     }
@@ -196,7 +200,7 @@ impl Registry {
         creds: SshCreds,
         events: Arc<dyn TunnelEvents>,
     ) -> Result<(), String> {
-        let (spec, slot, stop, state_tx) = {
+        let (spec, slot, stop, retry_now, state_tx) = {
             let mut entries = self.entries.lock().unwrap();
             let entry = entries
                 .get_mut(id)
@@ -205,21 +209,26 @@ impl Registry {
                 return Err("隧道已在运行".into());
             }
             entry.stop.store(false, Ordering::SeqCst);
+            entry.retry_now.store(false, Ordering::SeqCst);
             (
                 entry.spec.clone(),
                 entry.slot.shallow(),
                 entry.stop.clone(),
+                entry.retry_now.clone(),
                 entry.state_tx.clone(),
             )
         };
+        let on_bound_port = self.bound_port_updater(id, &events);
         let task = tokio::spawn(tunnel::run_task(
             spec,
             creds,
             slot,
             stop,
+            retry_now,
             state_tx,
             self.backend.clone(),
             events,
+            on_bound_port,
         ));
         self.entries
             .lock()
@@ -240,6 +249,74 @@ impl Registry {
         stop.store(true, Ordering::SeqCst);
         slot.close_current().await; // 未运行时无会话, 无操作
         Ok(())
+    }
+
+    /// 立即重试 (autossh SIGHUP 语义): Backoff 等待期间跳过剩余等待。
+    /// 非等待状态置位无害 (下次退避等待前由 start 清零)。
+    pub fn retry_now(&self, id: &str) -> Result<(), String> {
+        let entries = self.entries.lock().unwrap();
+        let entry = entries.get(id).ok_or_else(|| format!("隧道不存在: {id}"))?;
+        entry.retry_now.store(true, Ordering::SeqCst);
+        Ok(())
+    }
+
+    /// 硬断当前会话但**不**置停止意图——对引擎等价于网络掉线 (触发自动重连)。
+    /// (测试模拟断线; 高级用途: 用户手动强制重连)
+    pub async fn drop_connection(&self, id: &str) -> Result<(), String> {
+        let slot = {
+            let entries = self.entries.lock().unwrap();
+            let entry = entries.get(id).ok_or_else(|| format!("隧道不存在: {id}"))?;
+            entry.slot.shallow()
+        };
+        slot.close_current().await;
+        Ok(())
+    }
+
+    /// 端口回填回调 (状态机任务持有): 反向隧道端口 0 动态分配后,
+    /// 把实际端口写回 spec + 持久化 + 日志。端口未变 (显式端口) 则只记日志。
+    fn bound_port_updater(
+        &self,
+        id: &str,
+        events: &Arc<dyn TunnelEvents>,
+    ) -> Arc<dyn Fn(u16) + Send + Sync> {
+        let entries = self.entries.clone();
+        let dir = self.dir.clone();
+        let id = id.to_string();
+        let events = events.clone();
+        Arc::new(move |port: u16| {
+            let changed = {
+                let mut map = entries.lock().unwrap();
+                match map.get_mut(&id) {
+                    Some(entry) => match &mut entry.spec.kind {
+                        TunnelKind::Reverse { port: p, .. } if *p != port => {
+                            *p = port;
+                            true
+                        }
+                        _ => false,
+                    },
+                    None => return, // 已删除
+                }
+            };
+            if changed {
+                if let Some(dir) = &dir {
+                    let specs: Vec<TunnelSpec> = {
+                        let map = entries.lock().unwrap();
+                        map.values()
+                            .filter(|e| e.persisted)
+                            .map(|e| e.spec.clone())
+                            .collect()
+                    };
+                    if let Err(e) = store::save_tunnels(dir, &specs) {
+                        eprintln!("[registry] tunnels.json 保存失败: {e}");
+                    }
+                }
+                events.log(
+                    &id,
+                    "remote",
+                    &format!("服务器分配端口 {port}, 已回填并保存"),
+                );
+            }
+        })
     }
 
     /// 删除隧道 (运行中先停止; 条目移出, 任务自行收尾退出)
@@ -272,25 +349,29 @@ impl Registry {
             old.stop.store(true, Ordering::SeqCst);
             old.slot.shallow().close_current().await;
         }
-        let (state_tx, slot, stop) = {
+        let (state_tx, slot, stop, retry_now) = {
             let mut entries = self.entries.lock().unwrap();
             let entry = new_entry_parts(&spec, false);
-            let (state_tx, slot, stop) = (
+            let parts = (
                 entry.state_tx.clone(),
                 entry.slot.shallow(),
                 entry.stop.clone(),
+                entry.retry_now.clone(),
             );
             entries.insert(id.clone(), entry);
-            (state_tx, slot, stop)
+            parts
         };
+        let on_bound_port = self.bound_port_updater(&id, &events);
         let task = tokio::spawn(tunnel::run_task(
             spec,
             creds,
             slot,
             stop,
+            retry_now,
             state_tx,
             self.backend.clone(),
             events,
+            on_bound_port,
         ));
         self.entries
             .lock()

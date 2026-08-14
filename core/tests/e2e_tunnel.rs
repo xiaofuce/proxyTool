@@ -297,9 +297,10 @@ async fn session_mode_passes_large_data() {
         remote_port: 1082,
         local_proxy_host: "127.0.0.1".into(),
         local_proxy_port: echo_port,
+        keepalive: Default::default(),
     };
     let logger: Logger = Arc::new(|msg| println!("[tunnel] {msg}"));
-    let _tunnel = python_bridge::establish(cfg, logger)
+    let (_tunnel, _bound) = python_bridge::establish(cfg, logger)
         .await
         .expect("兼容模式隧道建立失败");
     let exec_h = connect_exec_handle().await;
@@ -360,9 +361,10 @@ async fn session_mode_multi_conn() {
         remote_port: 1082,
         local_proxy_host: "127.0.0.1".into(),
         local_proxy_port: echo_port,
+        keepalive: Default::default(),
     };
     let logger: Logger = Arc::new(|msg| println!("[tunnel] {msg}"));
-    let _tunnel = python_bridge::establish(cfg, logger)
+    let (_tunnel, _bound) = python_bridge::establish(cfg, logger)
         .await
         .expect("兼容模式隧道建立失败");
     let exec_h = connect_exec_handle().await;
@@ -437,9 +439,10 @@ async fn std_mode_diag() {
         remote_port: 1081,
         local_proxy_host: "127.0.0.1".into(),
         local_proxy_port: port,
+        keepalive: Default::default(),
     };
     let logger: Logger = Arc::new(|msg| println!("[tunnel] {msg}"));
-    let (_tunnel, _c) = run_tunnel(cfg, logger).await.expect("隧道建立失败");
+    let ((_tunnel, _c), _bound) = run_tunnel(cfg, logger).await.expect("隧道建立失败");
     let exec_h = connect_exec_handle().await;
 
     let cmd = "exec 2>&1
@@ -497,9 +500,10 @@ async fn server_can_reach_internet_through_tunnel() {
         remote_port: 1081,
         local_proxy_host: "127.0.0.1".into(),
         local_proxy_port: local_port,
+        keepalive: Default::default(),
     };
     let logger: Logger = Arc::new(|msg| println!("[tunnel] {msg}"));
-    let (_tunnel, _corrupted) = run_tunnel(cfg, logger).await.expect("隧道建立失败");
+    let ((_tunnel, _corrupted), _bound) = run_tunnel(cfg, logger).await.expect("隧道建立失败");
     println!("== 隧道建立成功");
     let exec_h = connect_exec_handle().await;
 
@@ -585,9 +589,10 @@ async fn disconnect_closes_session() {
         remote_port: 1083,
         local_proxy_host: "127.0.0.1".into(),
         local_proxy_port: echo_port,
+        keepalive: Default::default(),
     };
     let logger: Logger = Arc::new(|msg| println!("[tunnel] {msg}"));
-    let (session, _corrupted) = run_tunnel(cfg, logger).await.expect("隧道建立失败");
+    let ((session, _corrupted), _bound) = run_tunnel(cfg, logger).await.expect("隧道建立失败");
 
     // 确认连接建立时 is_closed() = false
     assert!(
@@ -636,4 +641,60 @@ async fn disconnect_closes_session() {
         "断开后服务器 1083 端口应被释放, 实际: {diag}"
     );
     println!("== 服务器侧确认: 隧道端口已释放");
+}
+
+/// -R 端口 0 (P4): 服务器动态分配实际端口 (标准模式 = tcpip_forward 回告值,
+/// 兼容模式 = 助手 PORT 行上报), run_tunnel 返回实际端口且数据通路完整往返。
+/// 本服务器 (libonion 注入) 会先走标准模式失败再回退兼容模式 —— 覆盖
+/// 兼容模式的 PORT 行协议 (标记帧前的新首写)。
+#[tokio::test]
+async fn port_zero_dynamic_allocation() {
+    init_logger();
+    let echo_port = start_echo_server().await;
+
+    let cfg = TunnelConfig {
+        server_host: SERVER.into(),
+        server_port: 22,
+        username: USER.into(),
+        password: pass().into(),
+        remote_port: 0, // 动态分配
+        local_proxy_host: "127.0.0.1".into(),
+        local_proxy_port: echo_port,
+        keepalive: Default::default(),
+    };
+    let logger: Logger = Arc::new(|msg| println!("[tunnel] {msg}"));
+    let ((_session, _c), bound) = run_tunnel(cfg, logger).await.expect("端口 0 隧道建立失败");
+    assert!(bound != 0, "动态分配的端口不应为 0");
+    println!("== 动态分配端口: {bound}");
+
+    // 服务器上经分配端口连接 → 写标志串 → 读回 echo (完整数据往返)。
+    // 用 python socket 而非 bash /dev/tcp: bash 的 write(2) 路径会被 libonion
+    // 注入审计数据 (见 session_mode_passes_large_data 同款注释), python 的
+    // send 路径与 curl 一致, 产品场景无注入。
+    let exec_h = connect_exec_handle().await;
+    let cmd = format!(
+        "exec 2>&1
+python3 - <<'PYEOF'
+import socket
+s=socket.create_connection((\"127.0.0.1\",{bound}),timeout=20)
+s.settimeout(20)
+s.sendall(b\"HELLO_PORT0\")
+d=b\"\"
+while len(d)<10:
+ x=s.recv(65536)
+ if not x: break
+ d+=x
+s.close()
+print(\"ECHO_OK\" if d==b\"HELLO_PORT0\" else \"ECHO_MISMATCH \"+repr(d[:48]))
+PYEOF
+ss -tln | grep ':{bound} ' || echo NO_LISTEN"
+    );
+    let out = exec_timeout(&exec_h, &cmd, Duration::from_secs(40)).await;
+    println!("--- 端口 0 通路 ---\n{out}");
+    assert!(
+        out.contains("ECHO_OK"),
+        "数据应经动态分配端口完整往返 (echo): {out}"
+    );
+    assert!(!out.contains("NO_LISTEN"), "服务器应在分配端口监听: {out}");
+    println!("== 端口 0 动态分配验证通过");
 }

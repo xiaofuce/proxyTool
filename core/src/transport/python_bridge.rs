@@ -21,12 +21,18 @@ use crate::transport::frame::{self, Frame, FrameParser};
 use crate::transport::russh_direct::connect_and_auth;
 use crate::tunnel::{TunnelConfig, TunnelSession};
 
-/// 兼容模式建立: 新 SSH 连接 + 会话通道桥接任务, 返回会话。
+/// 兼容模式建立: 新 SSH 连接 + 会话通道桥接任务。
 /// 污染标记恒 false —— 会话通道不经 sshd 转发路径, 无注入问题。
-pub async fn establish(cfg: TunnelConfig, logger: Logger) -> Result<TunnelSession, TunnelError> {
+/// 返回 (会话, 服务器实际监听端口): `remote_port=0` 时助手动态分配端口,
+/// 启动后经通道上报一行 `PORT <n>` (首条 stdout 写入, 无注入前史, 必然干净;
+/// 显式端口路径保持原协议不变, 不读该行)。
+pub async fn establish(
+    cfg: TunnelConfig,
+    logger: Logger,
+) -> Result<(TunnelSession, u16), TunnelError> {
     let (session, _) = connect_and_auth(&cfg, &logger).await?;
     (logger)(&format!(
-        "兼容模式: 在服务器上启动 stdio 转发助手 (监听 127.0.0.1:{})",
+        "兼容模式: 在服务器上启动 stdio 转发助手 (请求端口 {})",
         cfg.remote_port
     ));
 
@@ -34,57 +40,71 @@ pub async fn establish(cfg: TunnelConfig, logger: Logger) -> Result<TunnelSessio
     let target = format!("{}:{}", cfg.local_proxy_host, cfg.local_proxy_port);
     let helper_cmd = format!("{} {}", HELPER_PY, cfg.remote_port);
 
-    let h = handle.clone();
-    let logger2 = logger.clone();
-    // 桥接任务: 一个会话通道按顺序服务多个本地 SOCKS 连接。
+    // 通道建立与端口上报在 establish 内同步完成 (端口 0 时必须知道实际端口
+    // 才算建立成功; 助手秒退/上报异常也能在建连阶段报错, 而非静默空转):
+    // 一个会话通道按顺序服务多个本地 SOCKS 连接。
     // 通道两侧使用帧协议: [u32 BE 长度][数据], 长度=0 表示连接结束。
     // 服务器端每个连接 -> 通道里依次: 数据帧... 结束帧; 本机侧对称。
     // 读通道的循环放在独立任务中, 经 mpsc 把帧交给转发循环 (避免借用冲突)。
-    tokio::spawn(async move {
-        let chan = match h.lock().await.channel_open_session().await {
-            Ok(c) => c,
-            Err(e) => {
-                (logger2)(&format!("打开会话通道失败: {e}"));
-                return;
-            }
-        };
-        if let Err(e) = chan.exec(true, helper_cmd.as_str()).await {
-            (logger2)(&format!("启动转发助手失败: {e}"));
-            return;
-        }
-        (logger2)("转发助手已启动");
-        let chan = chan.into_stream();
+    let chan = handle
+        .lock()
+        .await
+        .channel_open_session()
+        .await
+        .map_err(|e| TunnelError::ChannelOpen {
+            what: "会话通道".into(),
+            reason: e.to_string(),
+        })?;
+    chan.exec(true, helper_cmd.as_str())
+        .await
+        .map_err(|e| TunnelError::Protocol(format!("启动转发助手失败: {e}")))?;
+    let chan = chan.into_stream();
 
-        use tokio::io::split;
+    use tokio::io::split;
 
-        enum FrameMsg {
-            Payload(Vec<u8>),
-            End, // 连接结束 (服务器端 EOF)
-            ChannelClosed,
-        }
-        enum LocalMsg {
-            Data(Vec<u8>),
-            Closed,
-        }
-        let (tx, mut rx) = tokio::sync::mpsc::channel::<FrameMsg>(32);
+    enum FrameMsg {
+        Payload(Vec<u8>),
+        End, // 连接结束 (服务器端 EOF)
+        ChannelClosed,
+    }
+    enum LocalMsg {
+        Data(Vec<u8>),
+        Closed,
+    }
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<FrameMsg>(32);
 
-        // 通道拆分为读写两半: 读半部给帧解析任务, 写半部由转发循环独占
-        let (mut chan_r, mut chan_w) = split(chan);
+    // 通道拆分为读写两半: 读半部给帧解析任务, 写半部由转发循环独占
+    let (mut chan_r, mut chan_w) = split(chan);
 
-        // 标记帧: 触发并吸收本机->服务器方向 (sshd 写 helper stdin) 的首次注入。
-        // helper 以"跳过注入"状态开始, 会丢弃标记帧前的注入数据。
-        if chan_w.write_all(&frame::MARKER).await.is_err() {
-            (logger2)("写标记帧失败");
-            return;
-        }
-        (logger2)("已发送标记帧 (吸收服务器端写注入)");
+    // 标记帧: 触发并吸收本机->服务器方向 (sshd 写 helper stdin) 的首次注入。
+    // helper 以"跳过注入"状态开始, 会丢弃标记帧前的注入数据。
+    chan_w
+        .write_all(&frame::MARKER)
+        .await
+        .map_err(|e| TunnelError::Protocol(format!("写标记帧失败: {e}")))?;
+    (logger)("已发送标记帧 (吸收服务器端写注入)");
 
-        // 帧读取任务: 通道字节流 -> 帧 -> 队列。
-        // 帧协议 (标记帧/CRC/分块/注入同步) 在 transport::frame, 独立单测覆盖;
-        // 此任务只做 IO: 读通道 -> feed 解析器 -> 转发帧给转发循环,
-        // 以及 partial 超时 (帧尾丢失, 注入截断) 的计时与重置。
+    // 端口 0: 读助手上报的端口行 (逐字节读, 不留缓冲残余给帧解析器)
+    let bound_port = if cfg.remote_port == 0 {
+        let p = read_port_line(&mut chan_r).await?;
+        (logger)(&format!("转发助手已启动, 动态分配端口 {p}"));
+        p
+    } else {
+        (logger)(&format!(
+            "转发助手已启动 (监听 127.0.0.1:{})",
+            cfg.remote_port
+        ));
+        cfg.remote_port as u16
+    };
+
+    let logger2 = logger;
+    // 帧读取任务: 通道字节流 -> 帧 -> 队列。
+    // 帧协议 (标记帧/CRC/分块/注入同步) 在 transport::frame, 独立单测覆盖;
+    // 此任务只做 IO: 读通道 -> feed 解析器 -> 转发帧给转发循环,
+    // 以及 partial 超时 (帧尾丢失, 注入截断) 的计时与重置。
+    {
         let logger3 = logger2.clone();
-        let pt_dump = std::env::var("PT_DUMP").is_ok();
+        let tx = tx.clone();
         tokio::spawn(async move {
             let mut parser = FrameParser::new();
             let mut tmp = [0u8; 16384];
@@ -110,7 +130,7 @@ pub async fn establish(cfg: TunnelConfig, logger: Logger) -> Result<TunnelSessio
                         break;
                     }
                     Ok(n) => {
-                        if pt_dump {
+                        if pt_dump_enabled() {
                             let head: String = tmp[..n]
                                 .iter()
                                 .take(24)
@@ -132,14 +152,16 @@ pub async fn establish(cfg: TunnelConfig, logger: Logger) -> Result<TunnelSessio
             }
             (logger3)("通道读取任务结束");
         });
+    }
 
-        // 转发循环: 每个连接: 首帧到达 -> 连本地代理 -> 双向转发 -> 结束帧 -> 下一连接
-        let pt_dump = std::env::var("PT_DUMP").is_ok();
-        let pdump = move |logger: &Logger, msg: &str| {
-            if pt_dump {
-                logger(&msg.to_string());
-            }
-        };
+    // 转发循环 (后台任务): 每个连接: 首帧到达 -> 连本地代理 -> 双向转发 -> 结束帧 -> 下一连接
+    let pt_dump = pt_dump_enabled();
+    let pdump = move |logger: &Logger, msg: &str| {
+        if pt_dump {
+            logger(&msg.to_string());
+        }
+    };
+    tokio::spawn(async move {
         'outer: loop {
             // 等待连接首帧
             let first = match rx.recv().await {
@@ -244,7 +266,49 @@ pub async fn establish(cfg: TunnelConfig, logger: Logger) -> Result<TunnelSessio
         (logger2)("隧道会话通道已结束");
     });
 
-    Ok((handle, Arc::new(AtomicBool::new(false))))
+    Ok(((handle, Arc::new(AtomicBool::new(false))), bound_port))
+}
+
+/// PT_DUMP 环境变量: 转发循环/读取任务的逐帧调试转储开关
+fn pt_dump_enabled() -> bool {
+    std::env::var("PT_DUMP").is_ok()
+}
+
+/// 读助手上报的端口行 `PORT <n>\n` (仅 remote_port=0 时调用)。
+/// 逐字节读: 不留缓冲残余, 之后帧解析器从干净状态开始。
+/// 该行是 helper 的**首条 stdout 写入**——注入转储是"前次写入的副本",
+/// 首写无前史, 必然干净抵达; 若 helper 秒退/上报异常, 在此报错而非静默空转。
+async fn read_port_line<R: tokio::io::AsyncRead + Unpin>(
+    chan_r: &mut R,
+) -> Result<u16, TunnelError> {
+    const TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+    let deadline = tokio::time::Instant::now() + TIMEOUT;
+    let mut line = Vec::new();
+    let mut b = [0u8; 1];
+    loop {
+        let n = tokio::time::timeout_at(deadline, chan_r.read(&mut b))
+            .await
+            .map_err(|_| TunnelError::Protocol("等待助手上报端口超时".into()))?
+            .map_err(|e| TunnelError::Protocol(format!("读助手端口行失败: {e}")))?;
+        if n == 0 {
+            return Err(TunnelError::Protocol(
+                "转发助手提前退出 (未上报端口)——服务器可能没有 python3".into(),
+            ));
+        }
+        if b[0] == b'\n' {
+            break;
+        }
+        line.push(b[0]);
+        if line.len() > 32 {
+            return Err(TunnelError::Protocol("助手端口行超长".into()));
+        }
+    }
+    let s = String::from_utf8_lossy(&line);
+    s.trim()
+        .strip_prefix("PORT ")
+        .and_then(|r| r.trim().parse::<u16>().ok())
+        .filter(|&p| p != 0)
+        .ok_or_else(|| TunnelError::Protocol(format!("助手端口行异常: {}", s.trim())))
 }
 
 /// python3 stdio 桥接助手: 监听 127.0.0.1:<port>, 每个连接接到 SSH 会话通道 stdin/stdout。
@@ -274,12 +338,13 @@ pub async fn establish(cfg: TunnelConfig, logger: Logger) -> Result<TunnelSessio
 /// 状态机 (FrameParser) 在 `transport::frame` (独立单测覆盖); 本常量是服务器侧
 /// python3 对称实现。
 ///
-/// helper 启动后: 预热自连 -> 写标记帧。**每个连接的数据前都写标记帧**: 注入
+/// helper 启动后: 预热自连 -> (端口 0 时) 上报 `PORT <n>` 行 -> 写标记帧。**每个连接的数据前都写标记帧**: 注入
 /// 转储可能分批到达且包含流量副本, 与真实帧无法区分, 本机端以"跳过注入"模式
 /// 丢弃标记帧之前的一切字节。读 stdin 时同样先跳过注入直到本机发来的标记帧。
 /// 无活动连接 (c is None) 时丢弃数据帧, 不崩溃。
 const HELPER_PY: &str = "python3 -c 'import socket,select,os,sys,zlib,time
 p=int(sys.argv[1])
+p0=(p==0)
 def dbg(m):
  try:
   f=open(\"/tmp/hc_dbg.log\",\"a\")
@@ -292,6 +357,7 @@ END=b\"\\xde\\xad\\xbe\\xef\"
 s=socket.socket()
 s.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1)
 s.bind((\"127.0.0.1\",p))
+p=s.getsockname()[1]
 s.listen(8)
 try:
  w=socket.socket(); w.settimeout(3)
@@ -301,6 +367,9 @@ try:
  c2.close(); w.close()
 except Exception:
  pass
+if p0:
+ sys.stdout.buffer.write(b\"PORT %d\\n\"%p)
+ sys.stdout.buffer.flush()
 sys.stdout.buffer.write(M)
 sys.stdout.buffer.flush()
 buf=b\"\"

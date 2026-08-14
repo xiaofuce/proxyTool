@@ -32,11 +32,13 @@ pub struct TunnelConfig {
     pub username: String,
     /// 密码仅用于内存中的认证, 不落盘
     pub password: String,
-    /// 服务器上监听的端口 (相当于 ssh -R 的远端端口)
+    /// 服务器上监听的端口 (相当于 ssh -R 的远端端口; 0 = 服务器动态分配)
     pub remote_port: u32,
     /// 本机 SOCKS 代理地址
     pub local_proxy_host: String,
     pub local_proxy_port: u16,
+    /// SSH 保活 (来自隧道 ReconnectPolicy, 判死时延 = interval × max)
+    pub keepalive: crate::ssh::Keepalive,
 }
 
 /// 日志回调 (定义在 ssh.rs, 三种隧道模式共用)
@@ -62,23 +64,39 @@ pub async fn close_session(session: &TunnelSession) {
         .await;
 }
 
-/// 建立隧道会话并返回句柄。调用方负责保持句柄存活 (drop 即断开)。
+/// 引擎关心的隧道运行事件 (start_tunnel → 引擎回调)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TunnelEvent {
+    /// 会话建立并开始服务 (含运行期重建为兼容模式后)
+    Connected,
+    /// 服务器实际监听端口 (remote_port=0 动态分配时与请求值不同,
+    /// 引擎据此回填 TunnelSpec 并持久化)
+    BoundPort(u16),
+}
+
+pub type OnTunnelEvent = Arc<dyn Fn(TunnelEvent) + Send + Sync>;
+
+/// 建立隧道会话并返回句柄与服务器实际监听端口 (remote_port=0 时由服务器
+/// 动态分配)。调用方负责保持句柄存活 (drop 即断开)。
 ///
 /// 传输选择策略 (P2b: 策略集中于此, 两种传输对调用方不感知模式差异):
 /// 1. 先试标准模式 (开销最小): 建立转发 + 主动探测注入;
 /// 2. 探测确认污染 / 转发不可用 → 回退兼容模式;
 /// 3. 连接/认证失败与模式无关, 直接透传 (兼容模式用同一条 SSH 连接,
 ///    重试必然同样失败; 错误密码不做无谓二次连接)。
-pub async fn run_tunnel(cfg: TunnelConfig, logger: Logger) -> Result<TunnelSession, TunnelError> {
+pub async fn run_tunnel(
+    cfg: TunnelConfig,
+    logger: Logger,
+) -> Result<(TunnelSession, u16), TunnelError> {
     match russh_direct::establish(&cfg, &logger).await {
-        Ok((session, corrupted)) => {
-            if corrupted.load(Ordering::Relaxed) {
+        Ok((session, bound_port)) => {
+            if session.1.load(Ordering::Relaxed) {
                 (logger)(
                     "检测到服务器转发通道被注入审计数据 (常见于云主机安全组件), 切换兼容模式...",
                 );
                 return python_bridge::establish(cfg, logger).await;
             }
-            Ok((session, corrupted))
+            Ok((session, bound_port))
         }
         Err(e) => {
             // 连接/认证阶段的失败与转发模式无关, 直接透传 ——
@@ -100,22 +118,27 @@ pub async fn run_tunnel(cfg: TunnelConfig, logger: Logger) -> Result<TunnelSessi
 /// 引擎入口: 建立隧道并常驻后台直到断开。
 /// 标准模式下若运行期检测到转发通道被注入 (探测漏检的兜底), 自动重建为兼容模式。
 /// 会话句柄存入调用方提供的 `session_slot` (GUI 经它取句柄断开);
-/// 日志与状态通过调用方提供的闭包转发 (与具体事件格式解耦)。
+/// 事件经 `on_event` 回调 (与具体事件格式解耦)。
 pub async fn start_tunnel(
     session_slot: TunnelSlot,
     cfg: TunnelConfig,
     logger: Logger,
-    on_status: Arc<dyn Fn(&str) + Send + Sync>,
+    on_event: OnTunnelEvent,
 ) -> Result<(), TunnelError> {
-    let (mut session, corrupted) = run_tunnel(cfg.clone(), logger.clone()).await?;
+    let ((mut session, corrupted), bound_port) = run_tunnel(cfg.clone(), logger.clone()).await?;
     let mut rebuilt = corrupted.load(Ordering::Relaxed); // 已在 run_tunnel 内切过兼容模式
+
+    // 端口 0 动态分配: 实际端口回告引擎 (回填 spec + 持久化)
+    if bound_port != cfg.remote_port as u16 {
+        on_event(TunnelEvent::BoundPort(bound_port));
+    }
 
     // 存入会话槽以便调用方断开
     {
         let mut guard = session_slot.lock().await;
         *guard = Some((session.clone(), corrupted.clone()));
     }
-    (on_status)("connected");
+    on_event(TunnelEvent::Connected);
 
     // 保持会话: 直到 is_closed (连接断开或手动 drop), 或运行期检测到注入后重建
     loop {
@@ -136,18 +159,22 @@ pub async fn start_tunnel(
             // 断开标准模式会话 (drop 即关闭), 重建兼容模式
             *session_slot.lock().await = None;
             drop(session);
-            let (new_session, _) = python_bridge::establish(cfg.clone(), logger.clone()).await?;
+            let ((new_session, _), new_bound) =
+                python_bridge::establish(cfg.clone(), logger.clone()).await?;
+            if new_bound != cfg.remote_port as u16 {
+                on_event(TunnelEvent::BoundPort(new_bound));
+            }
             session = new_session;
             {
                 let mut guard = session_slot.lock().await;
                 *guard = Some((session.clone(), corrupted.clone()));
             }
-            (on_status)("connected");
+            on_event(TunnelEvent::Connected);
             continue;
         }
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
     }
-    // 不在此 emit "disconnected": 终态由调用方 (GUI 重连循环) 统一控制,
+    // 不在此 emit disconnected: 终态由调用方 (引擎重连循环) 统一控制,
     // 否则会与重连循环的 disconnected/reconnecting 重复发射。
     Ok(())
 }

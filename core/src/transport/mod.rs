@@ -7,7 +7,9 @@
 //!   帧协议复用单通道 (云主机安全组件注入 sshd 转发通道时的回退路径)
 //!
 //! 公共接口: 两实现各暴露同签名函数
-//! `establish(cfg, logger) -> Result<TunnelSession, TunnelError>`
+//! `establish(cfg, logger) -> Result<(TunnelSession, u16), TunnelError>`
+//! —— 返回会话 + 服务器实际监听端口 (`remote_port=0` 动态分配时两者不同,
+//! 标准 = tcpip_forward 回告值, 兼容 = 助手 PORT 行上报)。
 //! (未做成形式 trait —— 引擎 run_tunnel 以 match 显式选择, 无 dyn 泛化需求;
 //! 污染探测 (首字节 0x00) 的探测与判定都在实现内部, 引擎不感知模式差异)。
 //!

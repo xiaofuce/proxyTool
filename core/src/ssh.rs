@@ -16,6 +16,33 @@ use crate::model::TunnelError;
 /// 日志回调: GUI 中转发到前端, 测试中直接打印
 pub type Logger = Arc<dyn Fn(&str) + Send + Sync>;
 
+/// SSH 保活参数 (OpenSSH ServerAliveInterval × CountMax 语义)。
+/// 判死时延 ≈ interval × max——网络静默时在该窗口内检测到断线并触发重连,
+/// 否则要等 TCP 超时 (可达数分钟)。值来自隧道的 ReconnectPolicy。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Keepalive {
+    /// 探测间隔 (russh keepalive_interval)
+    pub interval: Duration,
+    /// 无响应次数上限 (russh keepalive_max), 超过即判定连接死亡
+    pub max: u32,
+}
+
+impl Default for Keepalive {
+    fn default() -> Self {
+        Self {
+            interval: Duration::from_secs(10),
+            max: 3,
+        }
+    }
+}
+
+impl Keepalive {
+    /// 判死时延 (展示用): interval × max
+    pub fn dead_after(&self) -> Duration {
+        self.interval * self.max
+    }
+}
+
 /// 极简客户端 Handler: 本地转发 / 动态隧道使用。
 /// 不需要接收反向转发连接 (server_channel_open_forwarded_tcpip 用默认拒绝行为)。
 pub struct ConnectHandler {
@@ -42,11 +69,14 @@ pub async fn connect_auth<H: client::Handler<Error = russh::Error> + Send + 'sta
     server_port: u16,
     username: &str,
     password: &str,
+    keepalive: Keepalive,
     handler: H,
     logger: &Logger,
 ) -> Result<client::Handle<H>, TunnelError> {
     let mut config = client::Config::default();
-    config.keepalive_interval = Some(Duration::from_secs(10));
+    config.keepalive_interval = Some(keepalive.interval);
+    // russh keepalive_max: usize; policy 用 u32, 收敛并至少 1
+    config.keepalive_max = (keepalive.max as usize).max(1);
     let config = Arc::new(config);
 
     let addr = format!("{server_host}:{server_port}");
@@ -87,6 +117,7 @@ pub async fn remote_exec(
         server_port,
         username,
         password,
+        Keepalive::default(),
         ConnectHandler {
             logger: silent.clone(),
         },

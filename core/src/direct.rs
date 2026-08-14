@@ -33,6 +33,8 @@ pub struct DirectConfig {
     pub listen_host: String,
     /// 本机监听端口
     pub listen_port: u16,
+    /// SSH 保活 (来自隧道 ReconnectPolicy, 判死时延 = interval × max)
+    pub keepalive: crate::ssh::Keepalive,
 }
 
 /// 活动中的本地/动态隧道会话
@@ -97,6 +99,7 @@ pub async fn run_local_forward(
             cfg.server_port,
             &cfg.username,
             &cfg.password,
+            cfg.keepalive,
             ConnectHandler {
                 logger: logger.clone(),
             },
@@ -199,6 +202,7 @@ pub async fn run_dynamic_forward(
             cfg.server_port,
             &cfg.username,
             &cfg.password,
+            cfg.keepalive,
             ConnectHandler {
                 logger: logger.clone(),
             },

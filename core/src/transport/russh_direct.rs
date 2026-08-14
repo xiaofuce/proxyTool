@@ -147,6 +147,7 @@ pub(crate) async fn connect_and_auth(
         cfg.server_port,
         &cfg.username,
         &cfg.password,
+        cfg.keepalive,
         handler,
         logger,
     )
@@ -154,7 +155,9 @@ pub(crate) async fn connect_and_auth(
     Ok((session, corrupted))
 }
 
-/// 标准模式建立: 新 SSH 连接 + tcpip_forward + 污染探测, 返回会话。
+/// 标准模式建立: 新 SSH 连接 + tcpip_forward + 污染探测。
+/// 返回 (会话, 服务器实际监听端口) —— `remote_port=0` 时由 sshd 动态分配,
+/// 实际端口在返回值里 (等价 `ssh -R 0:` 的语义)。
 /// 与 `python_bridge::establish` 同签名 (传输层公共接口, 见 transport/mod.rs)。
 ///
 /// Err 语义 (调用方 run_tunnel 据此决定是否回退兼容模式):
@@ -164,21 +167,29 @@ pub(crate) async fn connect_and_auth(
 ///   被占) 或探测确认被注入 —— **回退兼容模式**。
 /// 成功后污染仍可能在运行期暴露 (探测漏检), 由 handler 首字节检查置位
 /// corrupted 标志, 引擎监控后重建为兼容模式。
-pub async fn establish(cfg: &TunnelConfig, logger: &Logger) -> Result<TunnelSession, TunnelError> {
+pub async fn establish(
+    cfg: &TunnelConfig,
+    logger: &Logger,
+) -> Result<(TunnelSession, u16), TunnelError> {
     let (session, corrupted) = connect_and_auth(cfg, logger).await?;
-    establish_forward(&session, cfg, logger).await?;
-    Ok((Arc::new(tokio::sync::Mutex::new(session)), corrupted))
+    let bound_port = establish_forward(&session, cfg, logger).await?;
+    Ok((
+        (Arc::new(tokio::sync::Mutex::new(session)), corrupted),
+        bound_port,
+    ))
 }
 
-/// 在已认证会话上: 请求服务器监听 remote_port + 污染探测。
+/// 在已认证会话上: 请求服务器监听 remote_port + 污染探测, 返回实际监听端口。
 async fn establish_forward(
     session: &client::Handle<TunnelHandler>,
     cfg: &TunnelConfig,
     logger: &Logger,
-) -> Result<(), TunnelError> {
+) -> Result<u16, TunnelError> {
     // bind_address 必须用 "localhost": OpenSSH 的 GatewayPorts 检查只放行
     // "localhost" 字面值 ("127.0.0.1"/"0.0.0.0" 会被拒绝或行为不稳定)。
     // 若 sshd 把 localhost 解析成 IPv6, 探测会失败并自动切换兼容模式。
+    // russh 0.62 tcpip_forward 返回服务器实际分配的端口 (remote_port=0 时
+    // 为动态分配值, 其余等于请求值)
     let actual_port = session
         .tcpip_forward("localhost", cfg.remote_port)
         .await
@@ -186,8 +197,11 @@ async fn establish_forward(
             port: cfg.remote_port,
             reason: e.to_string(),
         })?;
+    let bound_port: u16 = actual_port
+        .try_into()
+        .map_err(|_| TunnelError::Protocol(format!("服务器返回异常端口: {actual_port}")))?;
     (logger)(&format!(
-        "服务器已监听 127.0.0.1:{actual_port} (转发到 127.0.0.1:{})",
+        "服务器已监听 127.0.0.1:{bound_port} (转发到 127.0.0.1:{})",
         cfg.local_proxy_port
     ));
 
@@ -196,6 +210,7 @@ async fn establish_forward(
     // - PROBE_OK 且 corrupted (首字节 0x00 = 注入特征): 通道被审计数据污染 -> 切换兼容模式
     // - PROBE_OK 且未 corrupted (首字节 0x58 = 探测的 X, 干净): 标准模式可用
     // 写数据探测比被动等待可靠: 注入发生在"进程首次写"时, 探测写入必然触发。
+    // 注意端口用 sshd 实际分配的 bound_port (remote_port=0 时两者不同)。
     let probe = session
         .channel_open_session()
         .await
@@ -208,7 +223,7 @@ async fn establish_forward(
             true,
             format!(
                 "exec 3<>/dev/tcp/127.0.0.1/{0} && echo PROBE_OK && echo X >&3 || echo PROBE_FAIL",
-                cfg.remote_port
+                bound_port
             ),
         )
         .await
@@ -229,5 +244,5 @@ async fn establish_forward(
             out.trim()
         )));
     }
-    Ok(())
+    Ok(bound_port)
 }

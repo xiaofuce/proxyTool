@@ -1,57 +1,91 @@
 //! 单隧道状态机任务 (设计 §3.3/§3.5)
 //!
-//! 每条运行中的隧道一个 tokio 任务: 反复执行「尝试建立并运行直到断开」,
-//! 按 `TunnelError::retryable()` 决策 —— 致命错误立即 Failed, 可重试错误
-//! 指数退避 (1→2→…→30s 封顶)。状态经 watch 通道暴露给注册表快照,
-//! 事件经 `TunnelEvents` 发出 (id + kind tag, 迁移期与旧前端事件一一对应)。
+//! 每条运行中的隧道一个 tokio 任务: 反反复复执行「尝试建立并运行直到断开」,
+//! 按 `TunnelError::retryable()` 决策 —— 致命错误立即 Failed, 可重试错误进入
+//! FastBackoff 退避。状态经 watch 通道暴露给注册表快照, 事件经 `TunnelEvents`
+//! 发出 (id + kind tag, 迁移期与旧前端事件一一对应)。
 //!
-//! 语义与旧 src-tauri 的 `run_with_reconnect` 逐行为等价 (P3 搬家);
-//! FastBackoff / alive_reset / keepalive 显式化在 P4 落地。
+//! P4 重连语义 (融合 frp / rathole / autossh, 设计 §3.5):
+//! - **FastBackoff** (frp): 断线先 `fast_retries` × 1s 快试 (闪断秒恢复),
+//!   之后指数 2→4→…→`max_backoff` 封顶;
+//! - **存活重置** (rathole): 连接存活 ≥ `alive_reset` (默认 3s) 后断线,
+//!   退避计数归零——长稳连接偶发掉线不受 30s 惩罚, 掉线频繁才递增;
+//! - **立即重试** (autossh SIGHUP): Backoff 等待期间 `retry_now` 置位即
+//!   跳过剩余等待马上重连;
+//! - **保活显式化** (OpenSSH): policy → `Keepalive` (判死时延 = interval × max)。
 
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
-use std::time::Duration;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use tokio::sync::watch;
 
 use crate::backend::BackendPool;
 use crate::direct;
-use crate::model::{TunnelError, TunnelKind, TunnelSpec, TunnelState};
+use crate::model::{ReconnectPolicy, TunnelError, TunnelKind, TunnelSpec, TunnelState};
 use crate::ssh::Logger;
-use crate::tunnel;
+use crate::tunnel::{self, TunnelEvent};
 use crate::TunnelEvents;
 
 use super::{SessionSlot, SshCreds};
 
-/// 指数退避: 1→2→4→8→16→30→30…s (封顶 30s)
-fn next_backoff(cur: Duration) -> Duration {
-    std::cmp::min(cur * 2, Duration::from_secs(30))
+/// 第 n 次重连前的等待时长 (n 从 1 起)。
+/// FastBackoff (frp) + 现状指数序列 (1→2→4→…→封顶) 的复合:
+/// 先 `fast_retries` × 1s 快试, 之后指数序列从 1s 重新起步。
+/// fast_retries=3: 1,1,1, 1,2,4,8,16,30,30…; fast_retries=0: 1,2,4,8,16,30…
+fn wait_before(policy: &ReconnectPolicy, n: u32) -> Duration {
+    let exp = if n <= policy.fast_retries {
+        return Duration::from_secs(1);
+    } else {
+        n - policy.fast_retries - 1 // 快试之后的指数序号: 0,1,2,…
+    };
+    // 2^exp 秒, 封顶 max_backoff (指数溢出按饱和处理)
+    let secs = 1u64.checked_shl(exp).unwrap_or(u64::MAX);
+    Duration::min(Duration::from_secs(secs), policy.max_backoff)
 }
 
-/// 退避等待 `dur`, 期间每 200ms 检查停止标志; 返回 true = 用户请求停止
-async fn backoff_with_cancel(flag: &AtomicBool, dur: Duration) -> bool {
+/// 退避等待的结果
+enum BackoffOutcome {
+    /// 等满, 正常进入下一次尝试
+    Completed,
+    /// 用户请求停止
+    Stopped,
+    /// UI 请求立即重试 (跳过剩余等待)
+    RetryNow,
+}
+
+/// 退避等待 `dur`: 每 200ms 检查停止/立即重试标志。
+async fn backoff_wait(stop: &AtomicBool, retry_now: &AtomicBool, dur: Duration) -> BackoffOutcome {
     let mut waited = Duration::ZERO;
-    while waited < dur {
-        if flag.load(Ordering::SeqCst) {
-            return true;
+    loop {
+        if stop.load(Ordering::SeqCst) {
+            return BackoffOutcome::Stopped;
+        }
+        if retry_now.swap(false, Ordering::SeqCst) {
+            return BackoffOutcome::RetryNow;
+        }
+        if waited >= dur {
+            return BackoffOutcome::Completed;
         }
         let step = std::cmp::min(Duration::from_millis(200), dur - waited);
         tokio::time::sleep(step).await;
         waited += step;
     }
-    flag.load(Ordering::SeqCst)
 }
 
 /// 单隧道运行任务 (由 Registry 启动)。
+/// `on_bound_port`: 反向隧道端口 0 动态分配时, 服务器实际监听端口回填回调。
 /// 退出时置终态 (Stopped/Failed) 并清空会话槽。
 pub(super) async fn run_task(
     spec: TunnelSpec,
     creds: SshCreds,
     slot: SessionSlot,
     stop: Arc<AtomicBool>,
+    retry_now: Arc<AtomicBool>,
     state_tx: watch::Sender<TunnelState>,
     backend: Arc<BackendPool>,
     events: Arc<dyn TunnelEvents>,
+    on_bound_port: Arc<dyn Fn(u16) + Send + Sync>,
 ) {
     let id = spec.id.clone();
     let tag = spec.kind.tag();
@@ -83,7 +117,8 @@ pub(super) async fn run_task(
     };
 
     let policy_auto = spec.policy.auto;
-    let mut backoff = Duration::from_secs(1);
+    // 进入 Running 的时刻 (alive_reset 判据: 存活多久)
+    let connected_at: Arc<Mutex<Option<Instant>>> = Arc::new(Mutex::new(None));
     let mut n = 0u32;
     loop {
         // 循环顶检查: 覆盖「任务启动前用户已请求停止」的窗口
@@ -91,6 +126,7 @@ pub(super) async fn run_task(
             finish(&state_tx, &events, &id, tag, &Ok(()), &slot).await;
             return;
         }
+        *connected_at.lock().unwrap() = None;
         let _ = state_tx.send(TunnelState::Starting);
         events.status(&id, tag, "connecting", None);
 
@@ -102,6 +138,8 @@ pub(super) async fn run_task(
             &events,
             &logger,
             &reverse_local,
+            &on_bound_port,
+            &connected_at,
         )
         .await;
         if let Err(e) = &result {
@@ -112,27 +150,45 @@ pub(super) async fn run_task(
             finish(&state_tx, &events, &id, tag, &result, &slot).await;
             return;
         }
+        // rathole 存活重置: 长稳连接 (存活 ≥ alive_reset) 断线后从头快试
+        let alive_long = connected_at
+            .lock()
+            .unwrap()
+            .is_some_and(|t0| t0.elapsed() >= spec.policy.alive_reset);
+        if alive_long {
+            if n != 0 {
+                events.log(&id, tag, "连接存活超过重置阈值, 退避计数归零");
+            }
+            n = 0;
+        }
         n += 1;
+        let wait = wait_before(&spec.policy, n);
         let _ = state_tx.send(TunnelState::Backoff {
             attempt: n,
-            wait_secs: backoff.as_secs(),
+            wait_secs: wait.as_secs(),
         });
         events.status(
             &id,
             tag,
             "reconnecting",
-            Some(&format!("第 {n} 次重连, {}s 后重试", backoff.as_secs())),
+            Some(&format!("第 {n} 次重连, {}s 后重试", wait.as_secs())),
         );
-        if backoff_with_cancel(&stop, backoff).await {
-            finish(&state_tx, &events, &id, tag, &Ok(()), &slot).await;
-            return;
+        match backoff_wait(&stop, &retry_now, wait).await {
+            BackoffOutcome::Stopped => {
+                finish(&state_tx, &events, &id, tag, &Ok(()), &slot).await;
+                return;
+            }
+            BackoffOutcome::RetryNow => {
+                events.log(&id, tag, "跳过剩余等待, 立即重试");
+            }
+            BackoffOutcome::Completed => {}
         }
-        backoff = next_backoff(backoff);
     }
 }
 
 /// 一次尝试: 建立并运行隧道直到断开 (Ok) 或建连失败 (Err)。
 /// 会话句柄填入共享槽 (注册表据此硬断开), 结束时清槽。
+/// `connected_at`: 进入 Running 时写入 (alive_reset 判据)。
 async fn attempt(
     spec: &TunnelSpec,
     creds: &SshCreds,
@@ -141,9 +197,16 @@ async fn attempt(
     events: &Arc<dyn TunnelEvents>,
     logger: &Logger,
     reverse_local: &Option<(String, u16)>,
+    on_bound_port: &Arc<dyn Fn(u16) + Send + Sync>,
+    connected_at: &Arc<Mutex<Option<Instant>>>,
 ) -> Result<(), TunnelError> {
-    let id = &spec.id;
+    let id = spec.id.clone();
     let tag = spec.kind.tag();
+    // 保活来自隧道策略 (显式化: 判死时延 = interval × max, 默认 10s×3 ≈ 30s)
+    let keepalive = crate::ssh::Keepalive {
+        interval: spec.policy.keepalive,
+        max: spec.policy.keepalive_max,
+    };
     match &spec.kind {
         TunnelKind::Reverse { port, .. } => {
             let (local_host, local_port) = reverse_local
@@ -157,21 +220,26 @@ async fn attempt(
                 remote_port: *port as u32,
                 local_proxy_host: local_host,
                 local_proxy_port: local_port,
+                keepalive,
             };
-            // start_tunnel 内部建立会话并回调 "connected", 返回 = 会话结束
+            // start_tunnel 回调: Connected → Running; BoundPort → 注册表回填
             let st = state_tx.clone();
             let ev = events.clone();
             let id2 = id.clone();
-            let on_status: crate::ssh::Logger = Arc::new(move |s: &str| {
-                if s == "connected" {
+            let t0 = connected_at.clone();
+            let bound = on_bound_port.clone();
+            let on_event: tunnel::OnTunnelEvent = Arc::new(move |e: TunnelEvent| match e {
+                TunnelEvent::Connected => {
+                    *t0.lock().unwrap() = Some(Instant::now());
                     let _ = st.send(TunnelState::Running);
                     ev.status(&id2, tag, "connected", None);
                 }
+                TunnelEvent::BoundPort(p) => bound(p),
             });
             let SessionSlot::Reverse(rslot) = slot else {
                 unreachable!("反向隧道配反向会话槽");
             };
-            let r = tunnel::start_tunnel(rslot.clone(), cfg, logger.clone(), on_status).await;
+            let r = tunnel::start_tunnel(rslot.clone(), cfg, logger.clone(), on_event).await;
             *rslot.lock().await = None;
             r
         }
@@ -188,12 +256,23 @@ async fn attempt(
                 password: creds.password.clone(),
                 listen_host: bind.clone(),
                 listen_port: *port,
+                keepalive,
             };
             match direct::run_local_forward(cfg, target_host.clone(), *target_port, logger.clone())
                 .await
             {
                 Ok((session, task)) => {
-                    run_direct_session(slot, session, task, state_tx, events, id, tag).await
+                    run_direct_session(
+                        slot,
+                        session,
+                        task,
+                        state_tx,
+                        events,
+                        &id,
+                        tag,
+                        connected_at,
+                    )
+                    .await
                 }
                 Err(e) => Err(e),
             }
@@ -206,10 +285,21 @@ async fn attempt(
                 password: creds.password.clone(),
                 listen_host: bind.clone(),
                 listen_port: *port,
+                keepalive,
             };
             match direct::run_dynamic_forward(cfg, logger.clone()).await {
                 Ok((session, task)) => {
-                    run_direct_session(slot, session, task, state_tx, events, id, tag).await
+                    run_direct_session(
+                        slot,
+                        session,
+                        task,
+                        state_tx,
+                        events,
+                        &id,
+                        tag,
+                        connected_at,
+                    )
+                    .await
                 }
                 Err(e) => Err(e),
             }
@@ -218,6 +308,7 @@ async fn attempt(
 }
 
 /// 本地/动态隧道: 会话入槽 → Running → 运行任务直到断开 → 清槽
+#[allow(clippy::too_many_arguments)]
 async fn run_direct_session(
     slot: &SessionSlot,
     session: Arc<direct::DirectSession>,
@@ -226,11 +317,13 @@ async fn run_direct_session(
     events: &Arc<dyn TunnelEvents>,
     id: &str,
     tag: &str,
+    connected_at: &Arc<Mutex<Option<Instant>>>,
 ) -> Result<(), TunnelError> {
     let SessionSlot::Direct(dslot) = slot else {
         unreachable!("本地/动态隧道配直连会话槽");
     };
     *dslot.lock().await = Some(session);
+    *connected_at.lock().unwrap() = Some(Instant::now());
     let _ = state_tx.send(TunnelState::Running);
     events.status(id, tag, "connected", None);
     let _ = task.await; // 运行直到断开 (listener 随之 drop, 释放端口)
@@ -267,5 +360,51 @@ async fn finish(
             });
             events.status(id, tag, "error", Some(&msg));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::ReconnectPolicy;
+
+    fn policy(fast_retries: u32) -> ReconnectPolicy {
+        ReconnectPolicy {
+            auto: true,
+            fast_retries,
+            ..ReconnectPolicy::default()
+        }
+    }
+
+    /// FastBackoff 序列: 3×1s 快试 → 指数 1,2,4,8,16 → 30 封顶
+    #[test]
+    fn fast_backoff_sequence() {
+        let p = policy(3);
+        let seq: Vec<u64> = (1..=8).map(|n| wait_before(&p, n).as_secs()).collect();
+        assert_eq!(seq, vec![1, 1, 1, 1, 2, 4, 8, 16]);
+        // 封顶之后稳定 30s
+        assert_eq!(wait_before(&p, 9).as_secs(), 30);
+        assert_eq!(wait_before(&p, 99).as_secs(), 30);
+    }
+
+    /// fast_retries = 0: 直接指数退避 (1,2,4,…) —— 与旧版行为一致的形态
+    #[test]
+    fn no_fast_retries_is_pure_exponential() {
+        let p = policy(0);
+        let seq: Vec<u64> = (1..=5).map(|n| wait_before(&p, n).as_secs()).collect();
+        assert_eq!(seq, vec![1, 2, 4, 8, 16]);
+    }
+
+    /// max_backoff 可配置
+    #[test]
+    fn max_backoff_respected() {
+        let p = ReconnectPolicy {
+            max_backoff: Duration::from_secs(5),
+            ..policy(0)
+        };
+        assert_eq!(wait_before(&p, 1).as_secs(), 1);
+        assert_eq!(wait_before(&p, 3).as_secs(), 4);
+        assert_eq!(wait_before(&p, 4).as_secs(), 5);
+        assert_eq!(wait_before(&p, 10).as_secs(), 5);
     }
 }

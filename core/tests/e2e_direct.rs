@@ -32,6 +32,7 @@ fn cfg(listen_port: u16) -> DirectConfig {
         password: pass().into(),
         listen_host: "127.0.0.1".into(),
         listen_port,
+        keepalive: Default::default(),
     }
 }
 

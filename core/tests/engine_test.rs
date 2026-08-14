@@ -24,6 +24,9 @@ struct Collector {
 
 impl TunnelEvents for Collector {
     fn status(&self, id: &str, kind: &str, state: &str, message: Option<&str>) {
+        if std::env::var("PT_TRACE").is_ok() {
+            eprintln!("[trace] {id} {kind} {state} {:?}", message);
+        }
         self.statuses.lock().unwrap().push((
             id.into(),
             kind.into(),
@@ -32,6 +35,9 @@ impl TunnelEvents for Collector {
         ));
     }
     fn log(&self, _id: &str, _kind: &str, msg: &str) {
+        if std::env::var("PT_TRACE").is_ok() {
+            eprintln!("[trace log] {msg}");
+        }
         self.logs.lock().unwrap().push(msg.into());
     }
 }
@@ -276,4 +282,143 @@ async fn delete_running_tunnel() {
         "删除后列表不应再有该隧道"
     );
     assert!(registry.stop(&id).await.is_err(), "删除后 stop 应报不存在");
+}
+
+/// 网络掉线 (硬断会话, 无停止意图) → Backoff 第 1 拍 1s 快试 → 自动回 Running。
+/// 事件序列: connecting → connected → reconnecting(第 1 次, 1s) → connecting → connected。
+#[tokio::test]
+async fn network_drop_reconnects_with_fast_backoff() {
+    let registry = Registry::new();
+    let collector = Collector::default();
+    let events: Arc<dyn TunnelEvents> = Arc::new(collector.clone());
+    let spec = local_spec(free_port());
+    let id = spec.id.clone();
+    registry.create(spec).expect("创建失败");
+    registry
+        .start(&id, creds(), events)
+        .await
+        .expect("启动失败");
+    wait_state(&registry, &id, |s| matches!(s, TunnelState::Running)).await;
+    let port = listen_port(registry.list(), &id);
+
+    // 模拟网络掉线: 硬断当前会话, 不置停止意图
+    registry.drop_connection(&id).await.expect("硬断失败");
+
+    // 第 1 拍快试: Backoff{attempt:1, wait:1s} 出现后 1s 内自动重连
+    wait_state(&registry, &id, |s| {
+        matches!(
+            s,
+            TunnelState::Backoff {
+                attempt: 1,
+                wait_secs: 1,
+            }
+        )
+    })
+    .await;
+    wait_state(&registry, &id, |s| matches!(s, TunnelState::Running)).await;
+
+    // 重连后同端口仍可用 (listener 重建, 端口复用)
+    let mut conn = tokio::net::TcpStream::connect(("127.0.0.1", port))
+        .await
+        .expect("重连后连接本地监听端口失败");
+    let mut banner = Vec::new();
+    let _ = tokio::time::timeout(Duration::from_secs(10), conn.read_to_end(&mut banner)).await;
+    assert!(String::from_utf8_lossy(&banner).contains("SSH-"));
+
+    // 事件序列断言: 恰一次 reconnecting (第 1 次, 1s), 且连接两次 (初始 + 重连)
+    let statuses = collector.statuses();
+    let reconnects: Vec<_> = statuses
+        .iter()
+        .filter(|(_, _, s, _)| s == "reconnecting")
+        .collect();
+    assert_eq!(reconnects.len(), 1, "恰一次 reconnecting: {statuses:?}");
+    assert!(
+        reconnects[0]
+            .3
+            .as_deref()
+            .is_some_and(|m| m.contains("第 1 次重连, 1s")),
+        "首拍应为 1s 快试: {:?}",
+        reconnects[0].3
+    );
+    assert_eq!(
+        statuses
+            .iter()
+            .filter(|(_, _, s, _)| s == "connected")
+            .count(),
+        2,
+        "连接两次 (初始 + 重连): {statuses:?}"
+    );
+
+    registry.stop(&id).await.expect("停止失败");
+    wait_state(&registry, &id, |s| matches!(s, TunnelState::Stopped)).await;
+}
+
+fn listen_port(list: Vec<(TunnelSpec, TunnelState)>, id: &str) -> u16 {
+    match list.iter().find(|(s, _)| s.id == id) {
+        Some((s, _)) => match &s.kind {
+            TunnelKind::Local { port, .. } => *port,
+            _ => panic!("预期 Local 形态"),
+        },
+        None => panic!("隧道不存在: {id}"),
+    }
+}
+
+/// 立即重试: 退避等待期间置 retry_now → 跳过剩余等待马上发起新尝试
+#[tokio::test]
+async fn retry_now_skips_backoff_wait() {
+    let registry = Registry::new();
+    let collector = Collector::default();
+    let events: Arc<dyn TunnelEvents> = Arc::new(collector.clone());
+    // 目标不可达: 连接秒败 (Connect 可重试) → 持续退避。
+    // fast_retries=0: 直接进入指数段 —— 本机拒绝连接在 Windows 上单次耗 ~2s
+    // (防火墙/AV 检查), 默认快试序列会超出 wait_state 的 10s 窗口
+    let mut spec = local_spec(free_port());
+    spec.policy.fast_retries = 0;
+    let id = spec.id.clone();
+    registry.create(spec).expect("创建失败");
+
+    let bad = SshCreds {
+        host: "127.0.0.1".into(),
+        port: 1,
+        ..creds()
+    };
+    registry.start(&id, bad, events).await.expect("启动失败");
+
+    // 等到退避拉长 (wait >= 2s, 即快试用完进入指数段)
+    wait_state(
+        &registry,
+        &id,
+        |s| matches!(s, TunnelState::Backoff { wait_secs, .. } if *wait_secs >= 2),
+    )
+    .await;
+    let before = count_connecting(&collector);
+    let t0 = std::time::Instant::now();
+
+    registry.retry_now(&id).expect("立即重试失败");
+
+    // 新 connecting 应在远小于剩余等待 (≥2s) 的时间内出现
+    let mut appeared = false;
+    for _ in 0..30 {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        if count_connecting(&collector) > before {
+            appeared = true;
+            break;
+        }
+    }
+    assert!(appeared, "retry_now 后应立即发起新尝试");
+    assert!(
+        t0.elapsed() < Duration::from_millis(1500),
+        "新尝试应跳过剩余退避 (实际 {:?})",
+        t0.elapsed()
+    );
+
+    registry.stop(&id).await.expect("停止失败");
+}
+
+fn count_connecting(collector: &Collector) -> usize {
+    collector
+        .statuses()
+        .iter()
+        .filter(|(_, _, s, _)| s == "connecting")
+        .count()
 }
