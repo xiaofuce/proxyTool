@@ -18,7 +18,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use proxy_tool_core::socks::start_socks_server;
-use proxy_tool_core::tunnel::{run_tunnel, run_tunnel_session, Logger, TunnelConfig};
+use proxy_tool_core::transport::python_bridge;
+use proxy_tool_core::tunnel::{run_tunnel, Logger, TunnelConfig};
 use russh::client;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -298,7 +299,7 @@ async fn session_mode_passes_large_data() {
         local_proxy_port: echo_port,
     };
     let logger: Logger = Arc::new(|msg| println!("[tunnel] {msg}"));
-    let _tunnel = run_tunnel_session(cfg, logger)
+    let _tunnel = python_bridge::establish(cfg, logger)
         .await
         .expect("兼容模式隧道建立失败");
     let exec_h = connect_exec_handle().await;
@@ -361,7 +362,7 @@ async fn session_mode_multi_conn() {
         local_proxy_port: echo_port,
     };
     let logger: Logger = Arc::new(|msg| println!("[tunnel] {msg}"));
-    let _tunnel = run_tunnel_session(cfg, logger)
+    let _tunnel = python_bridge::establish(cfg, logger)
         .await
         .expect("兼容模式隧道建立失败");
     let exec_h = connect_exec_handle().await;
