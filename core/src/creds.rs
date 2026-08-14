@@ -1,11 +1,14 @@
 //! 测试/调试用的服务器凭据。密码永不入库: 优先读环境变量, 否则读
 //! `core/.test-creds.local` (该文件已被 .gitignore 忽略)。
-//! 换服务器: 编辑 `.test-creds.local` 或 `export PROXYTOOL_TEST_PASS` 等。
+//! 换服务器: 编辑 `.test-creds.local` (SERVER/USER/PASS/PORT, PORT 缺省 22)
+//! 或 `export PROXYTOOL_TEST_SERVER/USER/PASS/PORT`。
 
 use std::sync::OnceLock;
 
 pub struct Creds {
     pub server: String,
+    /// SSH 端口 (非标准端口服务器, 如 2222; 缺省 22)
+    pub port: u16,
     pub user: String,
     pub pass: String,
 }
@@ -16,30 +19,47 @@ fn read() -> Creds {
         std::env::var("PROXYTOOL_TEST_USER"),
         std::env::var("PROXYTOOL_TEST_PASS"),
     ) {
-        return Creds { server, user, pass };
+        let port = std::env::var("PROXYTOOL_TEST_PORT")
+            .ok()
+            .and_then(|p| p.parse().ok())
+            .unwrap_or(22);
+        return Creds {
+            server,
+            port,
+            user,
+            pass,
+        };
     }
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(".test-creds.local");
     let content = std::fs::read_to_string(&path).unwrap_or_else(|e| {
         panic!(
-            "未找到测试凭据 {p}: 请创建该文件 (内容 SERVER=... USER=... PASS=...) \
-             或设置环境变量 PROXYTOOL_TEST_SERVER/USER/PASS。读取错误: {e}",
+            "未找到测试凭据 {p}: 请创建该文件 (内容 SERVER=... USER=... PASS=... [PORT=...]) \
+             或设置环境变量 PROXYTOOL_TEST_SERVER/USER/PASS/PORT。读取错误: {e}",
             p = path.display()
         )
     });
     let mut server = String::new();
+    let mut port: Option<u16> = None;
     let mut user = String::new();
     let mut pass = String::new();
     for line in content.lines() {
         let line = line.trim_end_matches('\r');
         if let Some(v) = line.strip_prefix("SERVER=") {
             server = v.into();
+        } else if let Some(v) = line.strip_prefix("PORT=") {
+            port = v.parse().ok();
         } else if let Some(v) = line.strip_prefix("USER=") {
             user = v.into();
         } else if let Some(v) = line.strip_prefix("PASS=") {
             pass = v.into(); // 不 trim: 保留密码首尾空格, 仅去行尾换行
         }
     }
-    Creds { server, user, pass }
+    Creds {
+        server,
+        port: port.unwrap_or(22),
+        user,
+        pass,
+    }
 }
 
 static CREDS: OnceLock<Creds> = OnceLock::new();

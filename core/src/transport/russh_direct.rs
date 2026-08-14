@@ -1,8 +1,9 @@
 //! 标准模式传输: sshd 原生 `tcpip_forward` 转发通道 (等价原生 ssh -R, 开销最小)
 //!
 //! 职责:
-//! - `TunnelHandler`: 接收服务器转发的反向连接 —— 首字节污染检查 → 连本地
-//!   SOCKS → 双向桥接 (每连接独立任务, 并发服务)
+//! - `TunnelHandler`: 接收服务器转发的反向连接 —— 首字节污染检查 (只拦
+//!   注入特征 0x00) → 连本地落地 (SOCKS 或 Tcp) → 双向桥接 (每连接独立
+//!   任务, 并发服务)
 //! - `connect_and_auth`: 连接 + 密码认证 (标准/兼容两种模式共用, 桥接模式
 //!   不请求 tcpip_forward, handler 的转发回调不会被触发)
 //! - `establish`: 连接 + tcpip_forward + 污染探测 (与 python_bridge::establish
@@ -75,40 +76,31 @@ impl client::Handler for TunnelHandler {
         tokio::spawn(async move {
             let mut chan = channel.into_stream();
 
-            // 首字节检查: 本地端一定是 SOCKS5, 每个代理连接的首字节应为 0x05。
-            // 云主机安全组件 (如腾讯云 libonion) 在转发通道建立时注入审计数据,
-            // 首字节是其长度前缀的 0x00 — 据此识别并标记污染, 由上层切换兼容模式。
-            // 其他首字节 (如探测命令写入的 0x58 'X') 是探测数据, 静默丢弃, 不算污染。
+            // 首字节检查 (污染探测的运行期兜底): 云主机安全组件 (如腾讯云
+            // libonion) 在转发通道建立时注入审计数据, 首字节是其长度前缀的
+            // 0x00 — 仅拦截这一注入特征并标记污染 (上层据此重建为兼容模式)。
+            // 其余任意首字节一律放行桥接: 本地落地不一定是 SOCKS (Tcp 落地
+            // 如 HTTP 首字节 'G'), 不能假设 0x05 (干净服务器上误丢会断业务)。
+            // 探测连接写入的 0x58 'X' 等杂字节被转发到本地落地后由其自行
+            // 按坏请求关闭, 无害。
             let mut head = [0u8; 1];
-            let verdict =
-                match tokio::time::timeout(std::time::Duration::from_secs(2), chan.read(&mut head))
-                    .await
-                {
-                    Ok(Ok(0)) | Ok(Err(_)) | Err(_) => {
-                        // 无数据: 探测连接或对端已断开, 静默关闭
-                        (logger)("转发通道无数据, 关闭");
-                        None
-                    }
-                    Ok(Ok(_)) if head[0] == 0x05 => Some(true), // SOCKS5 握手, 正常
-                    Ok(Ok(_)) if head[0] == 0x00 => {
-                        // 首字节 0x00: 服务器端注入的审计数据 (长度前缀特征)
-                        (logger)(
-                            "检测到转发通道首字节 0x00, 疑似服务器端注入审计数据 (云主机安全组件)",
-                        );
-                        corrupted.store(true, Ordering::Relaxed);
-                        None
-                    }
-                    Ok(Ok(_)) => {
-                        // 其他首字节: 探测数据 (如 0x58 'X'), 静默丢弃
-                        (logger)(&format!(
-                            "转发通道首字节 0x{:02x} 非 SOCKS5 (探测数据?), 关闭",
-                            head[0]
-                        ));
-                        None
-                    }
-                };
-            if verdict.is_none() {
-                return;
+            match tokio::time::timeout(std::time::Duration::from_secs(2), chan.read(&mut head))
+                .await
+            {
+                Ok(Ok(0)) | Ok(Err(_)) | Err(_) => {
+                    // 无数据: 探测连接或对端已断开, 静默关闭
+                    (logger)("转发通道无数据, 关闭");
+                    return;
+                }
+                Ok(Ok(_)) if head[0] == 0x00 => {
+                    // 首字节 0x00: 服务器端注入的审计数据 (长度前缀特征)
+                    (logger)(
+                        "检测到转发通道首字节 0x00, 疑似服务器端注入审计数据 (云主机安全组件)",
+                    );
+                    corrupted.store(true, Ordering::Relaxed);
+                    return;
+                }
+                Ok(Ok(_)) => {} // 正常应用数据 (含 SOCKS5 的 0x05), 放行
             }
 
             // 桥接: 先连本地 SOCKS, 首字节写回流, 再双向复制
@@ -225,7 +217,7 @@ async fn establish_forward(
     // 探测: 让服务器连一次转发端口并写入 1 字节, 主动触发转发通道与可能的注入:
     // - PROBE_FAIL (连不上): 转发不可用 (地址族/端口被占) -> 切换兼容模式
     // - PROBE_OK 且 corrupted (首字节 0x00 = 注入特征): 通道被审计数据污染 -> 切换兼容模式
-    // - PROBE_OK 且未 corrupted (首字节 0x58 = 探测的 X, 干净): 标准模式可用
+    // - PROBE_OK 且未 corrupted (探测的 'X' 等任意字节被正常转发到本地落地): 干净, 标准模式可用
     // 写数据探测比被动等待可靠: 注入发生在"进程首次写"时, 探测写入必然触发。
     // 注意端口用 sshd 实际分配的 bound_port (remote_port=0 时两者不同)。
     let probe = session

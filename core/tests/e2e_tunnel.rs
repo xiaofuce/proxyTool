@@ -25,8 +25,10 @@ use proxy_tool_core::tunnel::{run_tunnel, Logger, TunnelConfig};
 use russh::client;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-const SERVER: &str = "203.0.113.20";
-const USER: &str = "tester";
+fn creds() -> &'static proxy_tool_core::creds::Creds {
+    proxy_tool_core::creds::load()
+}
+
 fn pass() -> &'static str {
     proxy_tool_core::creds::pass()
 }
@@ -60,11 +62,11 @@ impl client::Handler for ExecHandler {
 
 async fn connect_exec_handle() -> Arc<tokio::sync::Mutex<client::Handle<ExecHandler>>> {
     let config = Arc::new(client::Config::default());
-    let mut session = client::connect(config, &format!("{SERVER}:22"), ExecHandler)
+    let mut session = client::connect(config, &format!("{}:{}", creds().server, creds().port), ExecHandler)
         .await
         .expect("exec 连接失败");
     let auth = session
-        .authenticate_password(USER, pass())
+        .authenticate_password(&creds().user, pass())
         .await
         .expect("exec 认证失败");
     assert!(auth.success(), "exec 密码认证被拒绝");
@@ -292,9 +294,9 @@ async fn session_mode_passes_large_data() {
     let echo_port = start_echo_server().await;
 
     let cfg = TunnelConfig {
-        server_host: SERVER.into(),
-        server_port: 22,
-        username: USER.into(),
+        server_host: creds().server.clone(),
+        server_port: creds().port,
+        username: creds().user.clone(),
         auth: AuthMethod::Password(pass().into()),
         remote_port: 1082,
         local_proxy_host: "127.0.0.1".into(),
@@ -357,9 +359,9 @@ async fn session_mode_multi_conn() {
     let echo_port = start_echo_server().await;
 
     let cfg = TunnelConfig {
-        server_host: SERVER.into(),
-        server_port: 22,
-        username: USER.into(),
+        server_host: creds().server.clone(),
+        server_port: creds().port,
+        username: creds().user.clone(),
         auth: AuthMethod::Password(pass().into()),
         remote_port: 1082,
         local_proxy_host: "127.0.0.1".into(),
@@ -436,9 +438,9 @@ async fn std_mode_diag() {
     println!("--- 端口清理 ---\n{clean}");
 
     let cfg = TunnelConfig {
-        server_host: SERVER.into(),
-        server_port: 22,
-        username: USER.into(),
+        server_host: creds().server.clone(),
+        server_port: creds().port,
+        username: creds().user.clone(),
         auth: AuthMethod::Password(pass().into()),
         remote_port: 1081,
         local_proxy_host: "127.0.0.1".into(),
@@ -498,9 +500,9 @@ async fn server_can_reach_internet_through_tunnel() {
 
     // 2. 建立反向隧道 (真实代码路径, 自动选择模式)
     let cfg = TunnelConfig {
-        server_host: SERVER.into(),
-        server_port: 22,
-        username: USER.into(),
+        server_host: creds().server.clone(),
+        server_port: creds().port,
+        username: creds().user.clone(),
         auth: AuthMethod::Password(pass().into()),
         remote_port: 1081,
         local_proxy_host: "127.0.0.1".into(),
@@ -588,9 +590,9 @@ async fn disconnect_closes_session() {
     let echo_port = start_echo_server().await;
 
     let cfg = TunnelConfig {
-        server_host: SERVER.into(),
-        server_port: 22,
-        username: USER.into(),
+        server_host: creds().server.clone(),
+        server_port: creds().port,
+        username: creds().user.clone(),
         auth: AuthMethod::Password(pass().into()),
         remote_port: 1083,
         local_proxy_host: "127.0.0.1".into(),
@@ -652,17 +654,17 @@ async fn disconnect_closes_session() {
 
 /// -R 端口 0 (P4): 服务器动态分配实际端口 (标准模式 = tcpip_forward 回告值,
 /// 兼容模式 = 助手 PORT 行上报), run_tunnel 返回实际端口且数据通路完整往返。
-/// 本服务器 (libonion 注入) 会先走标准模式失败再回退兼容模式 —— 覆盖
-/// 兼容模式的 PORT 行协议 (标记帧前的新首写)。
+/// 干净服务器走标准模式直通; 被注入的服务器 (libonion) 先失败再回退兼容模式,
+/// 两种路径的 PORT 回告都被本用例覆盖。
 #[tokio::test]
 async fn port_zero_dynamic_allocation() {
     init_logger();
     let echo_port = start_echo_server().await;
 
     let cfg = TunnelConfig {
-        server_host: SERVER.into(),
-        server_port: 22,
-        username: USER.into(),
+        server_host: creds().server.clone(),
+        server_port: creds().port,
+        username: creds().user.clone(),
         auth: AuthMethod::Password(pass().into()),
         remote_port: 0, // 动态分配
         local_proxy_host: "127.0.0.1".into(),

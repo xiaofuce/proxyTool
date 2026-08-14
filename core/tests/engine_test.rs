@@ -53,7 +53,7 @@ fn creds() -> SshCreds {
     let c = proxy_tool_core::creds::load();
     SshCreds {
         host: c.server.clone(),
-        port: 22,
+        port: c.port,
         username: c.user.clone(),
         auth: AuthMethod::Password(c.pass.clone()),
     }
@@ -68,8 +68,8 @@ fn local_spec(listen_port: u16) -> TunnelSpec {
         kind: TunnelKind::Local {
             bind: "127.0.0.1".into(),
             port: listen_port,
-            target_host: proxy_tool_core::creds::load().server.clone(),
-            target_port: 22, // 目标 = 服务器自身 sshd, 读 banner 验证
+            target_host: "127.0.0.1".into(),
+            target_port: proxy_tool_core::creds::load().port, // 目标 = 服务器自身 sshd, 读 banner 验证
         },
         backend: Backend::default(),
         policy: ReconnectPolicy::default(),
@@ -217,7 +217,7 @@ async fn host_key_mismatch_is_fatal() {
     let c = proxy_tool_core::creds::load();
     registry.known_hosts().remember(
         &c.server,
-        22,
+        c.port,
         proxy_tool_core::known_hosts::KnownHost {
             algorithm: "ssh-ed25519".into(),
             fingerprint: "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA".into(),

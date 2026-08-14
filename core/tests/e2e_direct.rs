@@ -1,7 +1,8 @@
 //! 端到端验收测试: 本地转发 (ssh -L) 与 动态隧道 (ssh -D)
 //!
-//! 目标选择 127.0.0.1:22 (服务器自身 SSH): 无需在服务器上额外起服务,
-//! 读到 "SSH-2.0-..." banner 即证明 本机 -> SSH隧道 -> 服务器 链路完整。
+//! 目标选择 服务器自身 SSH 端口 (creds 指定, 见 core/.test-creds.local):
+//! 无需在服务器上额外起服务, 读到 "SSH-2.0-..." banner 即证明
+//! 本机 -> SSH隧道 -> 服务器 链路完整。
 //!
 //! 前提: 测试服务器可达。
 //! 运行: cargo test --test e2e_direct -- --nocapture
@@ -15,8 +16,9 @@ use proxy_tool_core::ssh::{AuthMethod, Logger};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
-const SERVER: &str = "203.0.113.20";
-const USER: &str = "tester";
+fn creds() -> &'static proxy_tool_core::creds::Creds {
+    proxy_tool_core::creds::load()
+}
 fn pass() -> &'static str {
     proxy_tool_core::creds::pass()
 }
@@ -27,9 +29,9 @@ fn silent_logger() -> Logger {
 
 fn cfg(listen_port: u16) -> DirectConfig {
     DirectConfig {
-        server_host: SERVER.into(),
-        server_port: 22,
-        username: USER.into(),
+        server_host: creds().server.clone(),
+        server_port: creds().port,
+        username: creds().user.clone(),
         auth: AuthMethod::Password(pass().into()),
         listen_host: "127.0.0.1".into(),
         listen_port,
@@ -70,7 +72,7 @@ async fn read_line(stream: &mut TcpStream) -> String {
 async fn local_forward_reaches_server_ssh() {
     let listen_port = free_port().await;
     let (session, task) =
-        run_local_forward(cfg(listen_port), "127.0.0.1".into(), 22, silent_logger())
+        run_local_forward(cfg(listen_port), "127.0.0.1".into(), creds().port, silent_logger())
             .await
             .expect("本地转发启动失败");
 
@@ -98,7 +100,7 @@ async fn local_forward_reaches_server_ssh() {
 async fn wrong_password_is_reported_as_auth_rejection() {
     let mut c = cfg(0); // 监听端口不会被用到 (认证在绑定前失败)
     c.auth = AuthMethod::Password(format!("{}-wrong", pass()));
-    let err = match run_local_forward(c, "127.0.0.1".into(), 22, silent_logger()).await {
+    let err = match run_local_forward(c, "127.0.0.1".into(), creds().port, silent_logger()).await {
         Err(e) => e,
         Ok(_) => panic!("错误密码应连接失败"),
     };
@@ -133,9 +135,9 @@ async fn key_auth_establishes_tunnel() {
         let known = known.clone();
         async move {
             proxy_tool_core::ssh::remote_exec(
-                SERVER,
-                22,
-                USER,
+                &creds().server,
+                creds().port,
+                &creds().user,
                 &AuthMethod::Password(pass().into()),
                 &cmd,
                 Duration::from_secs(30),
@@ -163,7 +165,7 @@ async fn key_auth_establishes_tunnel() {
             },
             ..cfg(listen_port)
         };
-        let (session, task) = run_local_forward(kcfg, "127.0.0.1".into(), 22, silent_logger())
+        let (session, task) = run_local_forward(kcfg, "127.0.0.1".into(), creds().port, silent_logger())
             .await
             .expect("私钥认证隧道建立失败");
         tokio::time::sleep(Duration::from_millis(800)).await;
@@ -215,9 +217,9 @@ async fn dynamic_socks_reaches_server_ssh() {
     s.read_exact(&mut r).await.unwrap();
     assert_eq!(r, [0x05, 0x00], "SOCKS 握手失败: {r:02x?}");
 
-    // CONNECT 127.0.0.1:22 (服务器自身 SSH)
+    // CONNECT 127.0.0.1:<服务器 SSH 端口> (服务器自身 SSH, 服务器视角)
     let mut req = vec![0x05, 0x01, 0x00, 0x01, 127, 0, 0, 1];
-    req.extend_from_slice(&22u16.to_be_bytes());
+    req.extend_from_slice(&creds().port.to_be_bytes());
     s.write_all(&req).await.unwrap();
     let mut rep = [0u8; 10];
     s.read_exact(&mut rep).await.unwrap();
