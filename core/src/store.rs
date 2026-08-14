@@ -216,6 +216,7 @@ mod tests {
                 host: "h".into(),
                 port: 22,
                 username: "u".into(),
+                identity_file: Some("C:/keys/id_ed25519".into()),
             }],
         };
         save_profiles(&dir, &store).unwrap();
@@ -223,6 +224,11 @@ mod tests {
         let back = load_profiles(&dir);
         assert_eq!(back.defaults.connect_timeout_secs, Some(15));
         assert_eq!(back.profiles.len(), 1);
+        assert_eq!(
+            back.profiles[0].identity_file.as_deref(),
+            Some("C:/keys/id_ed25519"),
+            "私钥路径应往返无损"
+        );
     }
 
     /// 文件不存在 → 空 store (不报错)

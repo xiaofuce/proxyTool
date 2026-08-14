@@ -157,7 +157,7 @@ pub(crate) async fn connect_and_auth(
         &cfg.server_host,
         cfg.server_port,
         &cfg.username,
-        &cfg.password,
+        &cfg.auth,
         cfg.keepalive,
         handler,
         logger,

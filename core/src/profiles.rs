@@ -1,6 +1,6 @@
 //! 服务器配置档案 (本地持久化)
 //!
-//! 只保存 名称/主机/端口/用户名 —— **密码永不落盘**, 每次连接时手动输入。
+//! 只保存 名称/主机/端口/用户名/私钥路径 —— **密码/口令永不落盘**, 每次连接时注入。
 //! 存储目录由调用方注入: GUI 传 app_data_dir, 测试/CLI 可传任意 (临时) 目录。
 
 use std::path::{Path, PathBuf};
@@ -8,12 +8,16 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ServerProfile {
     pub id: String,
     pub name: String,
     pub host: String,
     pub port: u16,
     pub username: String,
+    /// 私钥文件路径 (None = 密码认证; 密钥口令连接时注入, 同样不落盘)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identity_file: Option<String>,
 }
 
 /// 档案文件路径: <dir>/profiles.json (目录不存在则创建)

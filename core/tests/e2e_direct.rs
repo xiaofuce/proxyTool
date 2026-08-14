@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use proxy_tool_core::direct::{run_dynamic_forward, run_local_forward, DirectConfig};
 use proxy_tool_core::known_hosts::KnownHosts;
-use proxy_tool_core::ssh::Logger;
+use proxy_tool_core::ssh::{AuthMethod, Logger};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
@@ -30,7 +30,7 @@ fn cfg(listen_port: u16) -> DirectConfig {
         server_host: SERVER.into(),
         server_port: 22,
         username: USER.into(),
-        password: pass().into(),
+        auth: AuthMethod::Password(pass().into()),
         listen_host: "127.0.0.1".into(),
         listen_port,
         keepalive: Default::default(),
@@ -97,7 +97,7 @@ async fn local_forward_reaches_server_ssh() {
 #[tokio::test]
 async fn wrong_password_is_reported_as_auth_rejection() {
     let mut c = cfg(0); // 监听端口不会被用到 (认证在绑定前失败)
-    c.password = format!("{}-wrong", pass());
+    c.auth = AuthMethod::Password(format!("{}-wrong", pass()));
     let err = match run_local_forward(c, "127.0.0.1".into(), 22, silent_logger()).await {
         Err(e) => e,
         Ok(_) => panic!("错误密码应连接失败"),
@@ -106,6 +106,92 @@ async fn wrong_password_is_reported_as_auth_rejection() {
     assert!(
         matches!(err, proxy_tool_core::model::TunnelError::AuthRejected),
         "应识别为认证被拒 (停止重连), 实际: {err:?}"
+    );
+}
+
+/// 私钥认证 (P6): 本地生成 ed25519 密钥对 → 公钥经密码会话上传 authorized_keys →
+/// `AuthMethod::KeyFile` 建立本地转发并读到 SSH banner → 清理公钥行。
+/// 私钥随机生成仅存临时目录 (不入 git); authorized_keys 行带唯一标记, 结束删除。
+#[tokio::test]
+async fn key_auth_establishes_tunnel() {
+    // 1. 生成密钥对, openssh pem 写临时目录
+    let key = ssh_key::PrivateKey::random(&mut rand::rng(), ssh_key::Algorithm::Ed25519)
+        .expect("生成 ed25519 密钥失败");
+    let dir = std::env::temp_dir().join(format!("pt-key-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let key_path = dir.join("id_ed25519");
+    std::fs::write(
+        &key_path,
+        key.to_openssh(ssh_key::LineEnding::LF).unwrap().as_str(),
+    )
+    .unwrap();
+    let pubkey = key.public_key().to_openssh().unwrap();
+    let marker = format!("pt-e2e-{}", uuid::Uuid::new_v4().simple());
+
+    let known = Arc::new(KnownHosts::in_memory());
+    let admin = |cmd: String| {
+        let known = known.clone();
+        async move {
+            proxy_tool_core::ssh::remote_exec(
+                SERVER,
+                22,
+                USER,
+                &AuthMethod::Password(pass().into()),
+                &cmd,
+                Duration::from_secs(30),
+                &known,
+            )
+            .await
+        }
+    };
+
+    // 2. 上传公钥 (密码会话)
+    let out = admin(format!(
+        "mkdir -p ~/.ssh && chmod 700 ~/.ssh && echo '{pubkey} {marker}' >> ~/.ssh/authorized_keys && echo INSTALLED"
+    ))
+    .await
+    .expect("上传公钥失败");
+    assert!(out.contains("INSTALLED"), "应确认已写入: {out}");
+
+    // 3. KeyFile 认证建立本地转发, 读服务器 SSH banner
+    let result = async {
+        let listen_port = free_port().await;
+        let kcfg = DirectConfig {
+            auth: AuthMethod::KeyFile {
+                path: key_path.clone(),
+                passphrase: None,
+            },
+            ..cfg(listen_port)
+        };
+        let (session, task) = run_local_forward(kcfg, "127.0.0.1".into(), 22, silent_logger())
+            .await
+            .expect("私钥认证隧道建立失败");
+        tokio::time::sleep(Duration::from_millis(800)).await;
+        let mut s = TcpStream::connect(("127.0.0.1", listen_port))
+            .await
+            .expect("连接本地转发端口失败");
+        let banner = read_line(&mut s).await;
+        let _ = s.shutdown().await;
+        session.disconnect().await;
+        let _ = tokio::time::timeout(Duration::from_secs(5), task).await;
+        banner
+    }
+    .await;
+
+    // 4. 清理: 无论成败都删公钥行 + 删临时目录
+    let cleanup = admin(format!(
+        "sed -i '/{marker}/d' ~/.ssh/authorized_keys && echo CLEANED"
+    ))
+    .await;
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(
+        cleanup.unwrap_or_default().contains("CLEANED"),
+        "公钥行清理应成功"
+    );
+
+    assert!(
+        result.starts_with("SSH-2.0-"),
+        "私钥认证应读到服务器 SSH banner, 实际: {result:?}"
     );
 }
 

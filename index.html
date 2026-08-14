@@ -77,6 +77,13 @@
                 <span>用户名</span>
                 <input id="profile-user" type="text" placeholder="tester" />
               </label>
+              <label>
+                <span>私钥路径 (选填)</span>
+                <input id="profile-key" type="text" placeholder="C:\Users\you\.ssh\id_ed25519" />
+              </label>
+              <div class="hint" style="min-height:0;margin:4px 0">
+                填写私钥路径则用密钥认证 (公钥需已加入服务器 authorized_keys)，密码框此时充当密钥口令；留空用密码认证。
+              </div>
               <div class="actions">
                 <button type="submit" class="primary">保存</button>
                 <button type="button" id="profile-clear">清空表单</button>
@@ -152,7 +159,7 @@
 
           <div class="form-grid">
             <label>
-              <span>密码 (仅本次会话内存, 不保存)</span>
+              <span id="wz-password-label">密码 (仅本次会话内存, 不保存)</span>
               <input id="wz-password" type="password" autocomplete="off" />
             </label>
             <label class="check-label">

@@ -75,14 +75,34 @@ impl client::Handler for ConnectHandler {
     }
 }
 
-/// 连接服务器 + 密码认证, 返回会话句柄。密码仅用于内存认证, 不落盘。
+/// 认证方式 (连接时注入, 凭据仅存内存)
+#[derive(Debug, Clone)]
+pub enum AuthMethod {
+    /// 密码认证
+    Password(String),
+    /// 私钥文件认证 (path + 可选口令; 加载失败 = 致命配置错误)
+    KeyFile {
+        path: std::path::PathBuf,
+        passphrase: Option<String>,
+    },
+}
+
+/// 认证失败的错误归类: 私钥加载失败是配置错误 (致命), 不应混入网络类
+fn key_load_error(path: &std::path::Path, e: russh::keys::Error) -> TunnelError {
+    TunnelError::KeyLoad {
+        path: path.display().to_string(),
+        reason: e.to_string(),
+    }
+}
+
+/// 连接服务器 + 认证 (密码或私钥), 返回会话句柄。凭据仅用于内存认证, 不落盘。
 /// 错误为 TunnelError: Connect(网络)/AuthIo(认证阶段通信失败) 可重试,
-/// AuthRejected(密码被拒) 致命 —— 重连循环按 retryable() 决策。
+/// AuthRejected(密码被拒)/KeyLoad(私钥文件问题) 致命 —— 重连循环按 retryable() 决策。
 pub async fn connect_auth<H: client::Handler<Error = russh::Error> + Send + 'static>(
     server_host: &str,
     server_port: u16,
     username: &str,
-    password: &str,
+    auth: &AuthMethod,
     keepalive: Keepalive,
     handler: H,
     logger: &Logger,
@@ -102,11 +122,28 @@ pub async fn connect_auth<H: client::Handler<Error = russh::Error> + Send + 'sta
             addr: addr.clone(),
             source: e,
         })?;
-    let auth = session
-        .authenticate_password(username, password)
-        .await
-        .map_err(|e| TunnelError::AuthIo { source: e })?;
-    if !auth.success() {
+    let result = match auth {
+        AuthMethod::Password(password) => session
+            .authenticate_password(username, password)
+            .await
+            .map_err(|e| TunnelError::AuthIo { source: e })?,
+        AuthMethod::KeyFile { path, passphrase } => {
+            let key = russh::keys::load_secret_key(path, passphrase.as_deref())
+                .map_err(|e| key_load_error(path, e))?;
+            // RSA 需要显式哈希 (russh 直传 None 会落到 SHA-1), 其余算法忽略
+            let hash_alg = if key.algorithm().is_rsa() {
+                Some(russh::keys::HashAlg::Sha256)
+            } else {
+                None
+            };
+            let key = russh::keys::PrivateKeyWithHashAlg::new(Arc::new(key), hash_alg);
+            session
+                .authenticate_publickey(username, key)
+                .await
+                .map_err(|e| TunnelError::AuthIo { source: e })?
+        }
+    };
+    if !result.success() {
         return Err(TunnelError::AuthRejected);
     }
     logger("SSH 认证成功");
@@ -122,7 +159,7 @@ pub async fn remote_exec(
     server_host: &str,
     server_port: u16,
     username: &str,
-    password: &str,
+    auth: &AuthMethod,
     cmd: &str,
     timeout: Duration,
     known_hosts: &Arc<KnownHosts>,
@@ -141,7 +178,7 @@ pub async fn remote_exec(
         server_host,
         server_port,
         username,
-        password,
+        auth,
         Keepalive::default(),
         handler,
         &silent,

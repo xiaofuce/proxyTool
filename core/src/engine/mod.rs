@@ -20,13 +20,13 @@ use crate::model::{TunnelKind, TunnelSpec, TunnelState};
 use crate::store;
 use crate::TunnelEvents;
 
-/// 建连凭据 (每次启动时由调用方注入; 密码仅存内存)
+/// 建连凭据 (每次启动时由调用方注入; 密码/口令仅存内存)
 #[derive(Debug, Clone)]
 pub struct SshCreds {
     pub host: String,
     pub port: u16,
     pub username: String,
-    pub password: String,
+    pub auth: crate::ssh::AuthMethod,
 }
 
 /// 会话槽: 任务与注册表共享同一底层槽 (Arc 包裹, 浅克隆即共享)。

@@ -28,8 +28,8 @@ pub struct DirectConfig {
     pub server_host: String,
     pub server_port: u16,
     pub username: String,
-    /// 密码仅用于内存中的认证, 不落盘
-    pub password: String,
+    /// 认证方式 (密码/私钥; 凭据仅存内存)
+    pub auth: crate::ssh::AuthMethod,
     /// 本机监听地址 (当前固定 127.0.0.1)
     pub listen_host: String,
     /// 本机监听端口
@@ -105,7 +105,7 @@ async fn connect_direct(
         &cfg.server_host,
         cfg.server_port,
         &cfg.username,
-        &cfg.password,
+        &cfg.auth,
         cfg.keepalive,
         handler,
         logger,

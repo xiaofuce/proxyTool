@@ -18,3 +18,5 @@ uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]
 log = "0.4"
+# e2e 密钥认证测试: 生成随机 ed25519 密钥对 (与 russh 0.62 同版本系)
+rand = { version = "0.10", features = ["thread_rng"] }

@@ -154,13 +154,32 @@ async fn tunnel_create(
     tunnels_list(state).await
 }
 
-/// 命令: 启动隧道 (按 spec.profile_id 查档案; 密码本次注入, 不落盘)
+/// 档案 + 会话密码 → 认证方式。
+/// 密钥档案: 密码框充当密钥口令 (未加密私钥可留空);
+/// 密码档案: 密码必填 (仅会话内存, 不落盘)。
+fn resolve_auth(
+    profile: &profiles::ServerProfile,
+    password: Option<String>,
+) -> Result<ssh::AuthMethod, String> {
+    let nonempty = password.filter(|p| !p.is_empty());
+    match &profile.identity_file {
+        Some(path) => Ok(ssh::AuthMethod::KeyFile {
+            path: path.into(),
+            passphrase: nonempty,
+        }),
+        None => Ok(ssh::AuthMethod::Password(
+            nonempty.ok_or("该服务器使用密码认证, 请输入密码")?,
+        )),
+    }
+}
+
+/// 命令: 启动隧道 (按 spec.profile_id 查档案; 密码/口令本次注入, 不落盘)
 #[tauri::command]
 async fn tunnel_start(
     app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
     id: String,
-    password: String,
+    password: Option<String>,
 ) -> Result<(), String> {
     let spec = state
         .registry
@@ -178,11 +197,12 @@ async fn tunnel_start(
             .cloned()
             .ok_or_else(|| format!("隧道关联的档案不存在 (id: {})", spec.profile_id))?
     };
+    let auth = resolve_auth(&profile, password)?;
     let creds = SshCreds {
         host: profile.host,
         port: profile.port,
         username: profile.username,
-        password,
+        auth,
     };
     state.registry.start(&id, creds, emitter(&app)).await
 }
@@ -254,12 +274,12 @@ async fn tunnel_from_preset(
 
 // ---------- 场景动作 (vpn_share 预设附带; 反向隧道需已连接) ----------
 
-/// 反向隧道 → (档案 host/port/username, 服务器监听端口[含 -R 0 回填值])。
-/// 验证/部署命令据此免传全套连接参数 (密码除外, 不落盘)。
+/// 反向隧道 → (档案, 服务器监听端口[含 -R 0 回填值])。
+/// 验证/部署命令据此免传全套连接参数 (凭据除外, 不落盘)。
 async fn resolve_reverse(
     state: &tauri::State<'_, AppState>,
     id: &str,
-) -> Result<(String, u16, String, u32), String> {
+) -> Result<(profiles::ServerProfile, u32), String> {
     let spec = state
         .registry
         .list()
@@ -279,7 +299,7 @@ async fn resolve_reverse(
             .cloned()
             .ok_or_else(|| format!("隧道关联的档案不存在 (id: {})", spec.profile_id))?
     };
-    Ok((profile.host, profile.port, profile.username, port as u32))
+    Ok((profile, port as u32))
 }
 
 /// 探测本地代理端口的结果
@@ -309,17 +329,18 @@ async fn verify_remote_tunnel(
     app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
     id: String,
-    password: String,
+    password: Option<String>,
 ) -> Result<String, String> {
-    let (host, port, username, remote_port) = resolve_reverse(&state, &id).await?;
+    let (profile, remote_port) = resolve_reverse(&state, &id).await?;
+    let auth = resolve_auth(&profile, password)?;
     let cmd = format!(
         "echo '--- 直连(不经隧道) ---'; curl -s -o /dev/null -m 8 -w '直连: http_code=%{{http_code}} time=%{{time_total}}s\\n' https://www.google.com || echo '直连失败(预期: 服务器网络无法访问被墙站点)'; echo '--- 经隧道 ---'; curl -s -o /dev/null -m 10 -w '隧道: http_code=%{{http_code}} time=%{{time_total}}s\\n' --socks5-hostname 127.0.0.1:{remote_port} https://www.google.com || echo '隧道访问失败'"
     );
     let out = ssh::remote_exec(
-        &host,
-        port,
-        &username,
-        &password,
+        &profile.host,
+        profile.port,
+        &profile.username,
+        &auth,
         &cmd,
         std::time::Duration::from_secs(45),
         state.registry.known_hosts(),
@@ -336,9 +357,10 @@ async fn deploy_wrapper(
     app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
     id: String,
-    password: String,
+    password: Option<String>,
 ) -> Result<String, String> {
-    let (host, port, username, remote_port) = resolve_reverse(&state, &id).await?;
+    let (profile, remote_port) = resolve_reverse(&state, &id).await?;
+    let auth = resolve_auth(&profile, password)?;
     let cmd = format!(
         r#"set -e
 mkdir -p "$HOME/.local/bin"
@@ -361,10 +383,10 @@ fi"#,
         remote_port = remote_port
     );
     let out = ssh::remote_exec(
-        &host,
-        port,
-        &username,
-        &password,
+        &profile.host,
+        profile.port,
+        &profile.username,
+        &auth,
         &cmd,
         std::time::Duration::from_secs(30),
         state.registry.known_hosts(),

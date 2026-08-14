@@ -8,6 +8,8 @@ interface Profile {
   host: string;
   port: number;
   username: string;
+  /** 私钥路径 (选填): 设置后走密钥认证, 密码框改充当密钥口令 */
+  identityFile?: string | null;
 }
 
 // serde externally-tagged enum: { reverse: {...} } | { local: {...} } | { dynamic: {...} }
@@ -93,8 +95,8 @@ const STATUS_TEXT: Record<string, string> = {
 // ---------- 状态 ----------
 let tunnels: TunnelDto[] = [];
 let profiles: Profile[] = [];
-/** profileId -> 密码 (仅本会话内存; 启动/验证/部署复用, 重启即失) */
-const passwords = new Map<string, string>();
+/** profileId -> 本次会话凭据 (密码 / 密钥口令; null = 密钥档案无口令。仅内存, 重启即失) */
+const passwords = new Map<string, string | null>();
 /** tunnelId -> 日志文本 (行内展开时渲染; 上限防膨胀) */
 const logs = new Map<string, string>();
 /** tunnelId -> 展开状态 (重渲染保持) */
@@ -164,9 +166,9 @@ function isVpnShare(t: TunnelDto): boolean {
   return kindTag(t.kind) === "remote" && "socksAuto" in t.backend;
 }
 
-/** 该隧道是否需要密码才能操作 (本会话未输入过) */
+/** 该隧道是否还需要输入凭据 (本会话未输入过; 密钥档案无口令也算已输入) */
 function needPassword(t: TunnelDto): boolean {
-  return !passwords.get(t.profileId);
+  return !passwords.has(t.profileId);
 }
 
 function refreshNavDot() {
@@ -285,7 +287,10 @@ function renderTunnels() {
     pwBar.className = "pw-bar hidden";
     const pwInput = document.createElement("input");
     pwInput.type = "password";
-    pwInput.placeholder = `SSH 密码 (${profile ? profile.username + "@" + profile.host : "服务器"})`;
+    // 密钥档案: 密码框充当密钥口令 (未加密私钥可留空)
+    pwInput.placeholder = profile?.identityFile
+      ? `密钥口令 (${profile.username}@${profile.host}, 未加密私钥可留空)`
+      : `SSH 密码 (${profile ? profile.username + "@" + profile.host : "服务器"})`;
     pwInput.autocomplete = "off";
     const pwBtn = document.createElement("button");
     pwBtn.type = "button";
@@ -334,9 +339,10 @@ function renderTunnels() {
       expand.click();
     });
 
-    const doStart = async (password: string) => {
+    /** password: null = 密钥档案无口令 (后端 KeyFile passphrase=None) */
+    const doStart = async (password: string | null) => {
       try {
-        await invoke("tunnel_start", { id: t.id, password });
+        await invoke("tunnel_start", { id: t.id, password: password || null });
         passwords.set(t.profileId, password);
         pwBar.classList.add("hidden");
       } catch (err) {
@@ -344,9 +350,8 @@ function renderTunnels() {
       }
     };
     btnStart.addEventListener("click", async () => {
-      const cached = passwords.get(t.profileId);
-      if (cached) {
-        await doStart(cached);
+      if (passwords.has(t.profileId)) {
+        await doStart(passwords.get(t.profileId) ?? null);
         return;
       }
       expanded.add(t.id);
@@ -356,11 +361,12 @@ function renderTunnels() {
       pwInput.focus();
     });
     pwBtn.addEventListener("click", async () => {
-      if (!pwInput.value) {
+      // 密码档案必须非空; 密钥档案口令可空 (passphrase: None)
+      if (!pwInput.value && !profile?.identityFile) {
         pwInput.focus();
         return;
       }
-      await doStart(pwInput.value);
+      await doStart(pwInput.value || null);
     });
     pwInput.addEventListener("keydown", (e) => {
       if (e.key === "Enter") pwBtn.click();
@@ -403,18 +409,18 @@ function renderTunnels() {
       btnStart.click();
     });
     const runAction = async (cmd: "verify_remote_tunnel" | "deploy_wrapper") => {
-      const pass = passwords.get(t.profileId);
-      if (!pass) {
-        appendLog(t.id, "需要密码: 请先启动隧道 (或重新输入密码)");
+      if (!passwords.has(t.profileId)) {
+        appendLog(t.id, "需要凭据: 请先启动隧道 (或重新输入密码/口令)");
         btnStart.click();
         return;
       }
+      const pass = passwords.get(t.profileId) ?? null;
       const btn = cmd === "verify_remote_tunnel" ? btnVerify : btnDeploy;
       btn.disabled = true;
       const label = btn.textContent;
       btn.textContent = "执行中...";
       try {
-        await invoke<string>(cmd, { id: t.id, password: pass });
+        await invoke<string>(cmd, { id: t.id, password: pass || null });
         // 输出经 tunnel-log 事件回流行内日志, 此处不重复
       } catch (err) {
         appendLog(t.id, `❌ ${err}`);
@@ -608,6 +614,7 @@ async function selectPreset(p: Preset) {
   // 自动重连默认 = 档案层默认 (已由后端合入模板 policy)
   el<HTMLInputElement>("wz-auto").checked = wzSpec.policy.auto;
   el<HTMLInputElement>("wz-password").value = "";
+  syncWzPasswordLabel();
 
   // 预设专属字段
   const fields = el<HTMLDivElement>("wz-fields");
@@ -695,6 +702,19 @@ function wzApplyFields(spec: TunnelSpec): string | null {
   return null;
 }
 
+/** 当前向导选中的档案 */
+function wzProfile(): Profile | undefined {
+  return profiles.find((p) => p.id === el<HTMLSelectElement>("wz-profile").value);
+}
+
+/** 密码栏文案随档案认证方式切换 (密钥档案: 口令可空) */
+function syncWzPasswordLabel() {
+  el("wz-password-label").textContent = wzProfile()?.identityFile
+    ? "密钥口令 (私钥未加密可留空, 仅本次会话)"
+    : "密码 (仅本次会话内存, 不保存)";
+}
+el<HTMLSelectElement>("wz-profile").addEventListener("change", syncWzPasswordLabel);
+
 async function submitWizard(start: boolean) {
   if (!wzPreset || !wzSpec) return;
   const errEl = el<HTMLDivElement>("wz-error");
@@ -706,7 +726,8 @@ async function submitWizard(start: boolean) {
     return;
   }
   const password = el<HTMLInputElement>("wz-password").value;
-  if (start && !password) {
+  // 密钥档案口令可空 (passphrase: None); 密码档案必填
+  if (start && !password && !wzProfile()?.identityFile) {
     errEl.textContent = "启动需要密码 (仅本次会话内存)";
     return;
   }
@@ -720,9 +741,9 @@ async function submitWizard(start: boolean) {
     return;
   }
   if (start) {
-    passwords.set(profileId, password);
+    passwords.set(profileId, password || null);
     try {
-      await invoke("tunnel_start", { id: spec.id, password });
+      await invoke("tunnel_start", { id: spec.id, password: password || null });
     } catch (err) {
       appendLog(spec.id, `❌ ${err}`);
     }
@@ -757,7 +778,7 @@ async function refreshProfiles() {
 
     const info = document.createElement("div");
     info.className = "profile-info";
-    info.innerHTML = `<strong>${escapeHtml(p.name)}</strong><span>${escapeHtml(p.host)}:${p.port} (${escapeHtml(p.username)})</span>`;
+    info.innerHTML = `<strong>${escapeHtml(p.name)}</strong><span>${escapeHtml(p.host)}:${p.port} (${escapeHtml(p.username)})${p.identityFile ? " · 🔑 密钥认证" : ""}</span>`;
 
     const editBtn = document.createElement("button");
     editBtn.type = "button";
@@ -768,6 +789,7 @@ async function refreshProfiles() {
       el<HTMLInputElement>("profile-host").value = p.host;
       el<HTMLInputElement>("profile-port").value = String(p.port);
       el<HTMLInputElement>("profile-user").value = p.username;
+      el<HTMLInputElement>("profile-key").value = p.identityFile ?? "";
       el<HTMLInputElement>("profile-name").focus();
     });
 
@@ -802,6 +824,7 @@ function clearProfileForm() {
   el<HTMLInputElement>("profile-host").value = "";
   el<HTMLInputElement>("profile-port").value = "22";
   el<HTMLInputElement>("profile-user").value = "";
+  el<HTMLInputElement>("profile-key").value = "";
 }
 
 el<HTMLFormElement>("profile-form").addEventListener("submit", async (e) => {
@@ -810,6 +833,7 @@ el<HTMLFormElement>("profile-form").addEventListener("submit", async (e) => {
   const host = el<HTMLInputElement>("profile-host").value.trim();
   const port = Number(el<HTMLInputElement>("profile-port").value);
   const username = el<HTMLInputElement>("profile-user").value.trim();
+  const keyPath = el<HTMLInputElement>("profile-key").value.trim();
   if (!name || !host || !username) {
     alert("请填写名称、地址和用户名");
     return;
@@ -817,7 +841,7 @@ el<HTMLFormElement>("profile-form").addEventListener("submit", async (e) => {
   try {
     const id = el<HTMLInputElement>("profile-id").value || crypto.randomUUID();
     profiles = await invoke<Profile[]>("save_profile", {
-      profile: { id, name, host, port, username },
+      profile: { id, name, host, port, username, identityFile: keyPath || null },
     });
     clearProfileForm();
     await refreshProfiles();

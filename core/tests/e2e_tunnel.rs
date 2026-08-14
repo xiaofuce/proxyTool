@@ -18,6 +18,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use proxy_tool_core::known_hosts::KnownHosts;
+use proxy_tool_core::ssh::AuthMethod;
 use proxy_tool_core::socks::start_socks_server;
 use proxy_tool_core::transport::python_bridge;
 use proxy_tool_core::tunnel::{run_tunnel, Logger, TunnelConfig};
@@ -294,7 +295,7 @@ async fn session_mode_passes_large_data() {
         server_host: SERVER.into(),
         server_port: 22,
         username: USER.into(),
-        password: pass().into(),
+        auth: AuthMethod::Password(pass().into()),
         remote_port: 1082,
         local_proxy_host: "127.0.0.1".into(),
         local_proxy_port: echo_port,
@@ -359,7 +360,7 @@ async fn session_mode_multi_conn() {
         server_host: SERVER.into(),
         server_port: 22,
         username: USER.into(),
-        password: pass().into(),
+        auth: AuthMethod::Password(pass().into()),
         remote_port: 1082,
         local_proxy_host: "127.0.0.1".into(),
         local_proxy_port: echo_port,
@@ -438,7 +439,7 @@ async fn std_mode_diag() {
         server_host: SERVER.into(),
         server_port: 22,
         username: USER.into(),
-        password: pass().into(),
+        auth: AuthMethod::Password(pass().into()),
         remote_port: 1081,
         local_proxy_host: "127.0.0.1".into(),
         local_proxy_port: port,
@@ -500,7 +501,7 @@ async fn server_can_reach_internet_through_tunnel() {
         server_host: SERVER.into(),
         server_port: 22,
         username: USER.into(),
-        password: pass().into(),
+        auth: AuthMethod::Password(pass().into()),
         remote_port: 1081,
         local_proxy_host: "127.0.0.1".into(),
         local_proxy_port: local_port,
@@ -590,7 +591,7 @@ async fn disconnect_closes_session() {
         server_host: SERVER.into(),
         server_port: 22,
         username: USER.into(),
-        password: pass().into(),
+        auth: AuthMethod::Password(pass().into()),
         remote_port: 1083,
         local_proxy_host: "127.0.0.1".into(),
         local_proxy_port: echo_port,
@@ -662,7 +663,7 @@ async fn port_zero_dynamic_allocation() {
         server_host: SERVER.into(),
         server_port: 22,
         username: USER.into(),
-        password: pass().into(),
+        auth: AuthMethod::Password(pass().into()),
         remote_port: 0, // 动态分配
         local_proxy_host: "127.0.0.1".into(),
         local_proxy_port: echo_port,

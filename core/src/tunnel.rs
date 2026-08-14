@@ -31,8 +31,8 @@ pub struct TunnelConfig {
     pub server_host: String,
     pub server_port: u16,
     pub username: String,
-    /// 密码仅用于内存中的认证, 不落盘
-    pub password: String,
+    /// 认证方式 (密码/私钥; 凭据仅存内存)
+    pub auth: crate::ssh::AuthMethod,
     /// 服务器上监听的端口 (相当于 ssh -R 的远端端口; 0 = 服务器动态分配)
     pub remote_port: u32,
     /// 本机 SOCKS 代理地址

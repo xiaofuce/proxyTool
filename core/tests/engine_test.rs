@@ -10,6 +10,7 @@ use std::time::Duration;
 
 use proxy_tool_core::engine::{Registry, SshCreds};
 use proxy_tool_core::model::{Backend, ReconnectPolicy, TunnelKind, TunnelSpec, TunnelState};
+use proxy_tool_core::ssh::AuthMethod;
 use proxy_tool_core::TunnelEvents;
 use tokio::io::AsyncReadExt;
 
@@ -54,7 +55,7 @@ fn creds() -> SshCreds {
         host: c.server.clone(),
         port: 22,
         username: c.user.clone(),
-        password: c.pass.clone(),
+        auth: AuthMethod::Password(c.pass.clone()),
     }
 }
 
@@ -165,7 +166,7 @@ async fn wrong_password_stops_without_retry() {
     registry.create(spec).expect("创建失败");
 
     let bad = SshCreds {
-        password: "definitely-wrong".into(),
+        auth: AuthMethod::Password("definitely-wrong".into()),
         ..creds()
     };
     registry.start(&id, bad, events).await.expect("启动失败");

@@ -205,9 +205,13 @@ pub enum TunnelError {
         source: russh::Error,
     },
 
-    /// 服务器明确拒绝密码认证 —— 重连无法解决, 立即停止
-    #[error("密码认证被拒绝 (请检查用户名/密码)")]
+    /// 服务器明确拒绝认证 (密码错误 / 私钥未被服务器接受) —— 重连无法解决, 立即停止
+    #[error("认证被拒绝 (请检查用户名/密码, 或私钥是否已加入服务器 authorized_keys)")]
     AuthRejected,
+
+    /// 私钥文件加载失败 (不存在/格式错误/口令不对) —— 配置错误, 立即停止
+    #[error("加载私钥 {path} 失败: {reason}")]
+    KeyLoad { path: String, reason: String },
 
     /// 认证阶段的通信失败 (网络中断等, 与「密码错误」区分) —— 可重试:
     /// 宁可多试不误停 (旧版哲学保持)
@@ -315,12 +319,17 @@ mod tests {
             expected: "SHA256:aaa".into(),
             actual: "SHA256:bbb".into(),
         };
+        let key_load = TunnelError::KeyLoad {
+            path: "C:/k/id_ed25519".into(),
+            reason: "invalid format".into(),
+        };
         let cancelled = TunnelError::Cancelled;
         for e in [
             &auth_rejected,
             &port_in_use,
             &forward_rejected,
             &host_key_changed,
+            &key_load,
             &cancelled,
         ] {
             assert!(!e.retryable(), "{e} 应为致命 (停止重连)");
