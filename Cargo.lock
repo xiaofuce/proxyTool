@@ -3467,6 +3467,7 @@ dependencies = [
  "ssh-key",
  "thiserror 2.0.20",
  "tokio",
+ "uuid",
 ]
 
 [[package]]

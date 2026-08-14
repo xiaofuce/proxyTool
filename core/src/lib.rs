@@ -4,12 +4,13 @@
 //! 事件经 `TunnelEvents` trait / `Logger` 回调发回, 发射方式由调用方决定
 //! (GUI 转发到 WebView, 测试收集断言)。分层设计见 docs/重构设计.md。
 //!
-//! - `tunnel`: 反向隧道 (ssh -R), 含云主机安全组件兼容模式 (python3 桥接)
+//! - `tunnel`: 反向隧道 (ssh -R) 引擎组装 —— 传输实现 (标准/兼容) 在 `transport`
 //! - `direct`: 本地转发 (ssh -L) 与动态隧道 (ssh -D)
 //! - `ssh`: 连接/密码认证/远程执行 (三种模式共用)
 //! - `socks`: 内置 SOCKS5 服务器 (连接器可插拔: Plain / 经 SSH)
 //! - `probe`: 本机代理端口探测 (VPN 无关化)
-//! - `profiles`: 服务器档案 (存储目录注入, 密码永不落盘)
+//! - `profiles`: 服务器档案 (密码永不落盘)
+//! - `store`: 档案 + 隧道列表持久化 (JSON, 路径可注入, v1→v2 迁移)
 //! - `creds`: 测试/调试凭据 (环境变量或 gitignored 本地文件)
 
 pub mod creds;
@@ -19,6 +20,7 @@ pub mod probe;
 pub mod profiles;
 pub mod socks;
 pub mod ssh;
+pub mod store;
 pub mod transport;
 pub mod tunnel;
 
