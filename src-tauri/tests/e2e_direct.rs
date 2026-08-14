@@ -88,6 +88,24 @@ async fn local_forward_reaches_server_ssh() {
     let _ = tokio::time::timeout(Duration::from_secs(5), task).await;
 }
 
+/// 错误密码: 连接失败且错误信息可被识别为「认证被拒」——
+/// 重连循环 (lib.rs::run_with_reconnect) 依赖此分类立即停止重试,
+/// 本测试锁住 ssh::is_auth_rejected 与 connect_auth 错误文案的契约。
+#[tokio::test]
+async fn wrong_password_is_reported_as_auth_rejection() {
+    let mut c = cfg(0); // 监听端口不会被用到 (认证在绑定前失败)
+    c.password = format!("{}-wrong", pass());
+    let err = match run_local_forward(c, "127.0.0.1".into(), 22, silent_logger()).await {
+        Err(e) => e,
+        Ok(_) => panic!("错误密码应连接失败"),
+    };
+    println!("== 错误密码错误信息: {err:?}");
+    assert!(
+        proxy_tool_lib::ssh::is_auth_rejected(&err),
+        "应识别为认证被拒 (停止重连), 实际: {err:?}"
+    );
+}
+
 #[tokio::test]
 async fn dynamic_socks_reaches_server_ssh() {
     let listen_port = free_port().await;

@@ -169,6 +169,69 @@ async fn backoff_with_cancel(flag: &AtomicBool, dur: Duration) -> bool {
     flag.load(Ordering::SeqCst)
 }
 
+/// 通用重连循环 (三种隧道共用): 反复执行 `attempt` —— 建立并运行一次隧道直到
+/// 断开 (返回 Ok) 或建连失败 (返回 Err)。失败按指数退避重试 (1→2→…→30s 封顶)。
+/// 停止条件 (三者满足其一):
+/// - 用户断开意图 (`disconnect_intent`, 点「断开」按钮)
+/// - `auto_reconnect` 为 false (复选框关闭)
+/// - 认证被拒 (密码错误, 重连永远无法成功 —— 立即报错, 提示检查密码)
+///
+/// `attempt` 闭包内自行管理会话槽 (连接成功时填入 AppState, 结束时清空)
+/// 并 emit "connected"; 终态事件 (disconnected / error) 由本循环统一发射。
+async fn run_with_reconnect<F, Fut>(
+    app: &tauri::AppHandle,
+    kind: &'static str,
+    intent: &AtomicBool,
+    auto_reconnect: bool,
+    mut attempt: F,
+) where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<(), String>>,
+{
+    let mut backoff = Duration::from_secs(1);
+    let mut n = 0u32;
+    loop {
+        // 循环顶检查: 覆盖「spawn 启动前用户已点断开」的窗口
+        if intent.load(Ordering::SeqCst) {
+            emit_status(app, &StatusPayload::new(kind, "disconnected"));
+            return;
+        }
+        let result = attempt().await;
+        if let Err(e) = &result {
+            emit_log(app, kind, format!("❌ {e}"));
+        }
+        let auth_rejected = matches!(&result, Err(e) if ssh::is_auth_rejected(e));
+        if intent.load(Ordering::SeqCst) || !auto_reconnect || auth_rejected {
+            match result {
+                Ok(()) => emit_status(app, &StatusPayload::new(kind, "disconnected")),
+                Err(e) => {
+                    let msg = if auth_rejected {
+                        format!("{e} —— 已停止自动重连, 请检查用户名/密码后重新连接")
+                    } else {
+                        e
+                    };
+                    emit_status(app, &StatusPayload::error(kind, msg));
+                }
+            }
+            return;
+        }
+        n += 1;
+        emit_status(
+            app,
+            &StatusPayload {
+                kind,
+                state: "reconnecting".into(),
+                message: Some(format!("第 {n} 次重连, {}s 后重试", backoff.as_secs())),
+            },
+        );
+        if backoff_with_cancel(intent, backoff).await {
+            emit_status(app, &StatusPayload::new(kind, "disconnected"));
+            return;
+        }
+        backoff = next_backoff(backoff);
+    }
+}
+
 /// 探测本地代理端口的结果
 #[derive(Serialize, Clone)]
 struct ProbeResultPayload {
@@ -278,51 +341,29 @@ async fn connect_tunnel(
         emit_status(&app4, &StatusPayload::new("remote", s));
     });
 
-    // 后台任务: 重连循环 —— 反复建立隧道直到用户断开或关闭自动重连
+    // 后台任务: 重连循环 —— 反复建立隧道直到用户断开 / 认证被拒 / 关闭自动重连
     tauri::async_runtime::spawn(async move {
         let state2 = app2.state::<AppState>();
-        let mut backoff = Duration::from_secs(1);
-        let mut attempt = 0u32;
-        loop {
-            if state2.ctrl_remote.disconnect_intent.load(Ordering::SeqCst) {
-                emit_status(&app2, &StatusPayload::new("remote", "disconnected"));
-                break;
+        let attempt = || {
+            let app = app2.clone();
+            let cfg = cfg.clone();
+            let logger = logger.clone();
+            let on_status = on_status.clone();
+            async move {
+                // start_tunnel 内部建立会话并 emit "connected", 返回 = 会话结束
+                let r = tunnel::start_tunnel(app.clone(), cfg, logger, on_status).await;
+                *app.state::<AppState>().remote_session.lock().await = None;
+                r
             }
-            // 建立并运行直到断开 (start_tunnel 内部 emit "connected")
-            let result =
-                tunnel::start_tunnel(app2.clone(), cfg.clone(), logger.clone(), on_status.clone())
-                    .await;
-            *state2.remote_session.lock().await = None;
-            if let Err(e) = &result {
-                emit_log(&app2, "remote", format!("❌ {e}"));
-            }
-            // 决定是否重连
-            let intent = state2.ctrl_remote.disconnect_intent.load(Ordering::SeqCst);
-            if intent || !auto_reconnect {
-                match &result {
-                    Ok(()) => emit_status(&app2, &StatusPayload::new("remote", "disconnected")),
-                    Err(e) => emit_status(&app2, &StatusPayload::error("remote", e.clone())),
-                }
-                break;
-            }
-            attempt += 1;
-            emit_status(
-                &app2,
-                &StatusPayload {
-                    kind: "remote",
-                    state: "reconnecting".into(),
-                    message: Some(format!(
-                        "第 {attempt} 次重连, {}s 后重试",
-                        backoff.as_secs()
-                    )),
-                },
-            );
-            if backoff_with_cancel(&state2.ctrl_remote.disconnect_intent, backoff).await {
-                emit_status(&app2, &StatusPayload::new("remote", "disconnected"));
-                break;
-            }
-            backoff = next_backoff(backoff);
-        }
+        };
+        run_with_reconnect(
+            &app2,
+            "remote",
+            &state2.ctrl_remote.disconnect_intent,
+            auto_reconnect,
+            attempt,
+        )
+        .await;
         *state2.remote_session.lock().await = None;
         state2.ctrl_remote.running.store(false, Ordering::SeqCst);
     });
@@ -392,59 +433,32 @@ async fn connect_local(
 
     tauri::async_runtime::spawn(async move {
         let state2 = app2.state::<AppState>();
-        let mut backoff = Duration::from_secs(1);
-        let mut attempt = 0u32;
-        loop {
-            if state2.ctrl_local.disconnect_intent.load(Ordering::SeqCst) {
-                emit_status(&app2, &StatusPayload::new("local", "disconnected"));
-                break;
-            }
-            let outcome: Result<(), String> = match direct::run_local_forward(
-                cfg.clone(),
-                target_host.clone(),
-                target_port,
-                logger.clone(),
-            )
-            .await
-            {
-                Ok((session, task)) => {
-                    *state2.local_session.lock().await = Some(session);
-                    emit_status(&app2, &StatusPayload::new("local", "connected"));
-                    let _ = task.await; // 运行直到断开 (listener 随之 drop, 释放端口)
-                    *state2.local_session.lock().await = None;
-                    Ok(())
+        let attempt = || {
+            let app = app2.clone();
+            let cfg = cfg.clone();
+            let target_host = target_host.clone();
+            let logger = logger.clone();
+            async move {
+                match direct::run_local_forward(cfg, target_host, target_port, logger).await {
+                    Ok((session, task)) => {
+                        *app.state::<AppState>().local_session.lock().await = Some(session);
+                        emit_status(&app, &StatusPayload::new("local", "connected"));
+                        let _ = task.await; // 运行直到断开 (listener 随之 drop, 释放端口)
+                        *app.state::<AppState>().local_session.lock().await = None;
+                        Ok(())
+                    }
+                    Err(e) => Err(e),
                 }
-                Err(e) => {
-                    emit_log(&app2, "local", format!("❌ {e}"));
-                    Err(e)
-                }
-            };
-            let intent = state2.ctrl_local.disconnect_intent.load(Ordering::SeqCst);
-            if intent || !auto_reconnect {
-                match &outcome {
-                    Ok(()) => emit_status(&app2, &StatusPayload::new("local", "disconnected")),
-                    Err(e) => emit_status(&app2, &StatusPayload::error("local", e.clone())),
-                }
-                break;
             }
-            attempt += 1;
-            emit_status(
-                &app2,
-                &StatusPayload {
-                    kind: "local",
-                    state: "reconnecting".into(),
-                    message: Some(format!(
-                        "第 {attempt} 次重连, {}s 后重试",
-                        backoff.as_secs()
-                    )),
-                },
-            );
-            if backoff_with_cancel(&state2.ctrl_local.disconnect_intent, backoff).await {
-                emit_status(&app2, &StatusPayload::new("local", "disconnected"));
-                break;
-            }
-            backoff = next_backoff(backoff);
-        }
+        };
+        run_with_reconnect(
+            &app2,
+            "local",
+            &state2.ctrl_local.disconnect_intent,
+            auto_reconnect,
+            attempt,
+        )
+        .await;
         *state2.local_session.lock().await = None;
         state2.ctrl_local.running.store(false, Ordering::SeqCst);
     });
@@ -503,53 +517,31 @@ async fn connect_dynamic(
 
     tauri::async_runtime::spawn(async move {
         let state2 = app2.state::<AppState>();
-        let mut backoff = Duration::from_secs(1);
-        let mut attempt = 0u32;
-        loop {
-            if state2.ctrl_dynamic.disconnect_intent.load(Ordering::SeqCst) {
-                emit_status(&app2, &StatusPayload::new("dynamic", "disconnected"));
-                break;
-            }
-            let outcome: Result<(), String> =
-                match direct::run_dynamic_forward(cfg.clone(), logger.clone()).await {
+        let attempt = || {
+            let app = app2.clone();
+            let cfg = cfg.clone();
+            let logger = logger.clone();
+            async move {
+                match direct::run_dynamic_forward(cfg, logger).await {
                     Ok((session, task)) => {
-                        *state2.dynamic_session.lock().await = Some(session);
-                        emit_status(&app2, &StatusPayload::new("dynamic", "connected"));
+                        *app.state::<AppState>().dynamic_session.lock().await = Some(session);
+                        emit_status(&app, &StatusPayload::new("dynamic", "connected"));
                         let _ = task.await;
-                        *state2.dynamic_session.lock().await = None;
+                        *app.state::<AppState>().dynamic_session.lock().await = None;
                         Ok(())
                     }
-                    Err(e) => {
-                        emit_log(&app2, "dynamic", format!("❌ {e}"));
-                        Err(e)
-                    }
-                };
-            let intent = state2.ctrl_dynamic.disconnect_intent.load(Ordering::SeqCst);
-            if intent || !auto_reconnect {
-                match &outcome {
-                    Ok(()) => emit_status(&app2, &StatusPayload::new("dynamic", "disconnected")),
-                    Err(e) => emit_status(&app2, &StatusPayload::error("dynamic", e.clone())),
+                    Err(e) => Err(e),
                 }
-                break;
             }
-            attempt += 1;
-            emit_status(
-                &app2,
-                &StatusPayload {
-                    kind: "dynamic",
-                    state: "reconnecting".into(),
-                    message: Some(format!(
-                        "第 {attempt} 次重连, {}s 后重试",
-                        backoff.as_secs()
-                    )),
-                },
-            );
-            if backoff_with_cancel(&state2.ctrl_dynamic.disconnect_intent, backoff).await {
-                emit_status(&app2, &StatusPayload::new("dynamic", "disconnected"));
-                break;
-            }
-            backoff = next_backoff(backoff);
-        }
+        };
+        run_with_reconnect(
+            &app2,
+            "dynamic",
+            &state2.ctrl_dynamic.disconnect_intent,
+            auto_reconnect,
+            attempt,
+        )
+        .await;
         *state2.dynamic_session.lock().await = None;
         state2.ctrl_dynamic.running.store(false, Ordering::SeqCst);
     });

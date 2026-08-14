@@ -42,8 +42,11 @@ async fn main() {
     let mut stream = chan.into_stream();
     let mut out = Vec::new();
     // sshd 重启会断开本连接, 超时/EOF 均属正常
-    let _ = tokio::time::timeout(std::time::Duration::from_secs(10), stream.read_to_end(&mut out))
-        .await;
+    let _ = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        stream.read_to_end(&mut out),
+    )
+    .await;
     print!("{}", String::from_utf8_lossy(&out));
     println!(">>> 已请求重启 sshd, 客户端应在 ~15s 内检测到断开并进入重连");
 }

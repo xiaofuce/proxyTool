@@ -62,6 +62,29 @@ pub async fn connect_auth<H: client::Handler<Error = russh::Error> + Send + 'sta
     Ok(session)
 }
 
+/// 错误是否为「服务器明确拒绝密码」—— 重连无法解决, 重连循环应立即停止
+/// (见 lib.rs::run_with_reconnect)。
+/// 仅精确匹配 connect_auth 的 "密码认证被拒绝" (auth.success() == false);
+/// "认证失败: …" 可能是认证阶段的网络错误, 不匹配 (保持可重试, 宁可多试不误停)。
+/// tunnel.rs / direct.rs 对 connect_auth 的错误均原样透传, 故匹配可靠。
+pub fn is_auth_rejected(err: &str) -> bool {
+    err == "密码认证被拒绝"
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_auth_rejected;
+
+    #[test]
+    fn auth_rejection_is_classified() {
+        assert!(is_auth_rejected("密码认证被拒绝"));
+        // 网络/超时/端口等错误均应保持可重试
+        assert!(!is_auth_rejected("认证失败: channel closed"));
+        assert!(!is_auth_rejected("SSH 连接失败: Connection refused"));
+        assert!(!is_auth_rejected("绑定本机监听端口 1080 失败: Addr in use"));
+    }
+}
+
 /// 独立连接并在服务器上执行命令, 返回 stdout (含超时)。
 /// 与隧道连接分离: 验证 / 部署场景无需持有隧道句柄。
 pub async fn remote_exec(
