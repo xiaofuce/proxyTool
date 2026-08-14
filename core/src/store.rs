@@ -14,9 +14,13 @@ use serde::{Deserialize, Serialize};
 
 use crate::model::TunnelSpec;
 use crate::profiles::ServerProfile;
+use crate::scenarios::Scenario;
 
 /// profiles.json 当前版本
 pub const PROFILES_VERSION: u32 = 2;
+
+/// scenarios.json 当前版本
+pub const SCENARIOS_VERSION: u32 = 1;
 
 /// 全局默认值层 (所有档案共享, 单条档案可覆盖)
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -133,6 +137,42 @@ fn empty_store() -> ProfileStore {
     }
 }
 
+// ---------- scenarios.json (我的场景) ----------
+
+/// scenarios.json 结构
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScenarioStore {
+    pub version: u32,
+    #[serde(default)]
+    pub scenarios: Vec<Scenario>,
+}
+
+pub fn scenarios_path(dir: &Path) -> Result<PathBuf, String> {
+    create_dir(dir)?;
+    Ok(dir.join("scenarios.json"))
+}
+
+/// 读取我的场景 (文件不存在/损坏时返回空, 不阻断启动)
+pub fn load_scenarios(dir: &Path) -> ScenarioStore {
+    let Ok(path) = scenarios_path(dir) else {
+        return ScenarioStore { version: SCENARIOS_VERSION, scenarios: Vec::new() };
+    };
+    match std::fs::read_to_string(path) {
+        Ok(text) => serde_json::from_str(&text).unwrap_or(ScenarioStore {
+            version: SCENARIOS_VERSION,
+            scenarios: Vec::new(),
+        }),
+        Err(_) => ScenarioStore { version: SCENARIOS_VERSION, scenarios: Vec::new() },
+    }
+}
+
+/// 写入我的场景 (整体覆盖, 原子替换)
+pub fn save_scenarios(dir: &Path, store: &ScenarioStore) -> Result<(), String> {
+    let path = scenarios_path(dir)?;
+    write_json(&path, store)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -238,5 +278,37 @@ mod tests {
         let store = load_profiles(&dir);
         assert!(store.profiles.is_empty());
         assert_eq!(store.version, PROFILES_VERSION);
+    }
+
+    /// scenarios.json 往返; 缺失/损坏 → 空 (不阻断启动)
+    #[test]
+    fn scenarios_roundtrip_and_missing() {
+        let dir = tempdir();
+        assert!(load_scenarios(&dir).scenarios.is_empty(), "无文件应返回空");
+
+        let s = Scenario {
+            id: "s1".into(),
+            name: "实验室借网".into(),
+            description: String::new(),
+            kind: crate::model::TunnelKind::Local {
+                bind: "127.0.0.1".into(),
+                port: 18765,
+                target_host: "127.0.0.1".into(),
+                target_port: 2222,
+            },
+            backend: crate::model::Backend::default(),
+        };
+        let store = ScenarioStore {
+            version: SCENARIOS_VERSION,
+            scenarios: vec![s],
+        };
+        save_scenarios(&dir, &store).unwrap();
+        let back = load_scenarios(&dir);
+        assert_eq!(back.scenarios.len(), 1);
+        assert_eq!(back.scenarios[0], store.scenarios[0]);
+
+        // 损坏文件 → 空 (不 panic)
+        std::fs::write(scenarios_path(&dir).unwrap(), "{broken").unwrap();
+        assert!(load_scenarios(&dir).scenarios.is_empty());
     }
 }

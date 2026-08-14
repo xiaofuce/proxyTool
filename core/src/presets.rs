@@ -46,6 +46,13 @@ pub fn list() -> Vec<Preset> {
             description: "动态隧道: 本机 SOCKS5, 服务器代连其内网任意地址",
             actions: &[],
         },
+        // 从空白配置: 形态/后端全部自选 (Termius 式自由度, 不预设场景)
+        Preset {
+            id: "custom",
+            name: "自定义",
+            description: "从空白配置: 自选隧道形态 (反向/本地/动态) 与落地后端",
+            actions: &[],
+        },
     ]
 }
 
@@ -70,6 +77,11 @@ pub fn template(preset_id: &str, name: &str, profile_id: &str) -> Result<TunnelS
         "reach_lan" => TunnelKind::Dynamic {
             bind: "127.0.0.1".into(),
             port: 1080,
+        },
+        // 自定义: 空白起点, 表单里切形态/改端口 (默认给反向+SocksAuto 的常用组合)
+        "custom" => TunnelKind::Reverse {
+            bind: "127.0.0.1".into(),
+            port: 0,
         },
         _ => return Err(format!("未知预设: {preset_id}")),
     };

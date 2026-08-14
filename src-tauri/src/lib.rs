@@ -7,6 +7,8 @@
 //! 命令面 (P5, 旧三页兼容命令已移除):
 //! - 隧道: `tunnels_list/tunnel_create/tunnel_start/tunnel_stop/tunnel_retry_now/tunnel_delete`
 //! - 预设向导: `presets_list/tunnel_from_preset`
+//! - 我的场景 (用户保存的模板): `scenarios_list/scenario_save/scenario_delete/
+//!   tunnel_from_scenario`
 //! - 档案: `list_profiles/save_profile/delete_profile` + 分层默认值
 //!   `profile_defaults_get/profile_defaults_save`
 //! - 场景动作: `verify_remote_tunnel/deploy_wrapper` (vpn_share 预设附带)
@@ -20,6 +22,7 @@ use std::sync::Arc;
 
 use proxy_tool_core::engine::{Registry, SshCreds};
 use proxy_tool_core::model::{TunnelKind, TunnelSpec, TunnelState};
+use proxy_tool_core::scenarios::Scenario;
 use proxy_tool_core::{presets, probe, profiles, ssh, store, TunnelEvents};
 use serde::Serialize;
 use tauri::Manager;
@@ -33,6 +36,8 @@ pub struct AppState {
     pub registry: Registry,
     /// 档案存储 (v2: defaults + profiles; save/delete 经此落盘)
     pub profile_store: Mutex<store::ProfileStore>,
+    /// 我的场景 (用户保存的隧道模板; scenarios.json)
+    pub scenario_store: Mutex<store::ScenarioStore>,
 }
 
 /// 隧道状态事件负载: { id, kind, state, message? }
@@ -307,10 +312,95 @@ async fn tunnel_from_preset(
     profile_id: String,
 ) -> Result<TunnelSpec, String> {
     let mut spec = presets::template(&preset_id, &name, &profile_id)?;
-    // 分层默认值: 档案层的重连策略覆盖模板内置默认 (向导表单仍可再改)
+    apply_profile_defaults(&state, &mut spec).await;
+    Ok(spec)
+}
+
+/// 分层默认值: 档案层的重连策略覆盖模板内置默认 (表单仍可再改)。
+/// 预设/我的场景两条模板生成路径共用。
+async fn apply_profile_defaults(state: &tauri::State<'_, AppState>, spec: &mut TunnelSpec) {
     if let Some(reconnect) = state.profile_store.lock().await.defaults.reconnect.clone() {
         spec.policy = reconnect;
     }
+}
+
+// ---------- 我的场景 (用户保存的隧道模板; Termius 式向导「我的场景」卡片) ----------
+
+/// 命令: 我的场景列表
+#[tauri::command]
+async fn scenarios_list(
+    state: tauri::State<'_, AppState>,
+) -> Result<Vec<Scenario>, String> {
+    Ok(state.scenario_store.lock().await.scenarios.clone())
+}
+
+/// 命令: 保存/更新场景 (id 相同则覆盖; 空描述自动生成), 返回最新列表
+#[tauri::command]
+async fn scenario_save(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+    mut scenario: Scenario,
+) -> Result<Vec<Scenario>, String> {
+    if scenario.name.trim().is_empty() {
+        return Err("场景名称不能为空".into());
+    }
+    if scenario.id.trim().is_empty() {
+        scenario.id = TunnelSpec::new_id();
+    }
+    if scenario.description.trim().is_empty() {
+        scenario.description = scenario.describe();
+    }
+    let mut store_guard = state.scenario_store.lock().await;
+    if let Some(s) = store_guard.scenarios.iter_mut().find(|s| s.id == scenario.id) {
+        *s = scenario;
+    } else {
+        store_guard.scenarios.push(scenario);
+    }
+    store::save_scenarios(&data_dir(&app)?, &store_guard)?;
+    Ok(store_guard.scenarios.clone())
+}
+
+/// 命令: 删除场景, 返回最新列表
+#[tauri::command]
+async fn scenario_delete(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+    id: String,
+) -> Result<Vec<Scenario>, String> {
+    let mut store_guard = state.scenario_store.lock().await;
+    store_guard.scenarios.retain(|s| s.id != id);
+    store::save_scenarios(&data_dir(&app)?, &store_guard)?;
+    Ok(store_guard.scenarios.clone())
+}
+
+/// 命令: 按我的场景生成隧道模板 (克隆 kind/backend; 重连策略继承档案层默认值)
+#[tauri::command]
+async fn tunnel_from_scenario(
+    state: tauri::State<'_, AppState>,
+    scenario_id: String,
+    name: String,
+    profile_id: String,
+) -> Result<TunnelSpec, String> {
+    let scenario = state
+        .scenario_store
+        .lock()
+        .await
+        .scenarios
+        .iter()
+        .find(|s| s.id == scenario_id)
+        .cloned()
+        .ok_or_else(|| format!("场景不存在: {scenario_id}"))?;
+    let mut spec = TunnelSpec {
+        id: TunnelSpec::new_id(),
+        name,
+        enabled: true,
+        profile_id,
+        kind: scenario.kind,
+        backend: scenario.backend,
+        policy: Default::default(),
+    };
+    spec.validate()?;
+    apply_profile_defaults(&state, &mut spec).await;
     Ok(spec)
 }
 
@@ -620,7 +710,7 @@ pub fn run() {
             }
 
             // 隧道列表: 恢复配置 (凭据不落盘, 不自动启动)
-            let registry = Registry::persistent(dir);
+            let registry = Registry::persistent(dir.clone());
             let restored = registry.restore();
             if !restored.is_empty() {
                 println!("[setup] 已恢复 {} 条隧道配置", restored.len());
@@ -629,6 +719,7 @@ pub fn run() {
             app.manage(AppState {
                 registry,
                 profile_store: Mutex::new(profile_store),
+                scenario_store: Mutex::new(store::load_scenarios(&dir)),
             });
 
             setup_tray(handle)?;
@@ -685,6 +776,10 @@ pub fn run() {
             tunnel_set_enabled,
             presets_list,
             tunnel_from_preset,
+            scenarios_list,
+            scenario_save,
+            scenario_delete,
+            tunnel_from_scenario,
             list_profiles,
             save_profile,
             delete_profile,

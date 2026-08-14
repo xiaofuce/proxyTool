@@ -122,9 +122,19 @@ pub struct Registry {
     dir: Option<PathBuf>,
     /// Arc 包裹: 端口回填回调 (状态机任务触发) 需要跨任务访问条目表
     entries: Arc<Mutex<HashMap<String, Entry>>>,
+    /// 创建顺序 (HashMap 无序, UI 列表与落盘按此稳定输出)
+    order: Arc<Mutex<Vec<String>>>,
     backend: Arc<BackendPool>,
     /// 主机密钥记忆库 (TOFU): 全部隧道共享, 持久化时随 dir 落盘
     known_hosts: Arc<KnownHosts>,
+}
+
+/// 按创建顺序取全部 spec (list/落盘共用)
+fn specs_in_order(order: &[String], entries: &HashMap<String, Entry>) -> Vec<TunnelSpec> {
+    order
+        .iter()
+        .filter_map(|id| entries.get(id).map(|e| e.spec.clone()))
+        .collect()
 }
 
 impl Registry {
@@ -133,6 +143,7 @@ impl Registry {
         Self {
             dir: None,
             entries: Arc::new(Mutex::new(HashMap::new())),
+            order: Arc::new(Mutex::new(Vec::new())),
             backend: Arc::new(BackendPool::new()),
             known_hosts: KnownHosts::in_memory(),
         }
@@ -144,6 +155,7 @@ impl Registry {
         Self {
             dir: Some(dir),
             entries: Arc::new(Mutex::new(HashMap::new())),
+            order: Arc::new(Mutex::new(Vec::new())),
             backend: Arc::new(BackendPool::new()),
             known_hosts,
         }
@@ -162,21 +174,22 @@ impl Registry {
         };
         let specs = store::load_tunnels(dir);
         let mut entries = self.entries.lock().unwrap();
+        let mut order = self.order.lock().unwrap();
         for spec in specs {
+            order.push(spec.id.clone());
             let entry = new_entry_parts(&spec);
             entries.insert(spec.id.clone(), entry);
         }
-        let restored: Vec<TunnelSpec> = entries.values().map(|e| e.spec.clone()).collect();
-        restored
+        specs_in_order(&order, &entries)
     }
 
-    /// 全量快照: (spec, 当前状态)
+    /// 全量快照: (spec, 当前状态), 按创建顺序
     pub fn list(&self) -> Vec<(TunnelSpec, TunnelState)> {
-        self.entries
-            .lock()
-            .unwrap()
-            .values()
-            .map(|e| (e.spec.clone(), e.state()))
+        let entries = self.entries.lock().unwrap();
+        let order = self.order.lock().unwrap();
+        order
+            .iter()
+            .filter_map(|id| entries.get(id).map(|e| (e.spec.clone(), e.state())))
             .collect()
     }
 
@@ -189,6 +202,7 @@ impl Registry {
                 return Err(format!("隧道 id 已存在: {}", spec.id));
             }
             entries.insert(spec.id.clone(), new_entry_parts(&spec));
+            self.order.lock().unwrap().push(spec.id.clone());
         }
         self.persist();
         Ok(())
@@ -283,6 +297,7 @@ impl Registry {
         events: &Arc<dyn TunnelEvents>,
     ) -> Arc<dyn Fn(u16) + Send + Sync> {
         let entries = self.entries.clone();
+        let order = self.order.clone();
         let dir = self.dir.clone();
         let id = id.to_string();
         let events = events.clone();
@@ -304,7 +319,8 @@ impl Registry {
                 if let Some(dir) = &dir {
                     let specs: Vec<TunnelSpec> = {
                         let map = entries.lock().unwrap();
-                        map.values().map(|e| e.spec.clone()).collect()
+                        let order = order.lock().unwrap();
+                        specs_in_order(&order, &map)
                     };
                     if let Err(e) = store::save_tunnels(dir, &specs) {
                         eprintln!("[registry] tunnels.json 保存失败: {e}");
@@ -338,6 +354,7 @@ impl Registry {
         self.stop(id).await.ok(); // 不存在时下面统一报
         let removed = {
             let mut entries = self.entries.lock().unwrap();
+            self.order.lock().unwrap().retain(|i| i != id);
             entries.remove(id)
         };
         removed.ok_or_else(|| format!("隧道不存在: {id}"))?;
@@ -352,7 +369,8 @@ impl Registry {
         };
         let specs: Vec<TunnelSpec> = {
             let entries = self.entries.lock().unwrap();
-            entries.values().map(|e| e.spec.clone()).collect()
+            let order = self.order.lock().unwrap();
+            specs_in_order(&order, &entries)
         };
         if let Err(e) = store::save_tunnels(dir, &specs) {
             // 持久化失败不阻断运行, 但必须可见 (下次启动列表会丢失)

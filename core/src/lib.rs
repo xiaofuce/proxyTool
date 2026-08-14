@@ -26,6 +26,7 @@ pub mod model;
 pub mod presets;
 pub mod probe;
 pub mod profiles;
+pub mod scenarios;
 pub mod socks;
 pub mod ssh;
 pub mod store;

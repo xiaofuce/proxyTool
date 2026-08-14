@@ -17,49 +17,125 @@
           <div class="brand-sub">SSH 隧道工具</div>
         </div>
         <nav class="nav">
-          <button class="nav-item active" data-page="tunnels">
-            <span class="nav-icon">⇄</span><span class="nav-label">隧道</span>
+          <button class="nav-item active" data-page="servers">
+            <span class="nav-icon">▤</span><span class="nav-label">服务器</span>
+          </button>
+          <button class="nav-item" data-page="tunnels">
+            <span class="nav-icon">⇄</span><span class="nav-label">总览</span>
             <span class="nav-dot" id="dot-tunnels"></span>
           </button>
-          <button class="nav-item" data-page="servers">
-            <span class="nav-icon">▤</span><span class="nav-label">服务器</span>
+          <button class="nav-item" data-page="defaults">
+            <span class="nav-icon">⚙</span><span class="nav-label">默认值</span>
           </button>
         </nav>
         <div class="sidebar-foot">密码仅存内存 · 不落盘</div>
       </aside>
 
-      <!-- ===================== 内容区 ===================== -->
-      <main class="content">
-
-        <!-- ========== 隧道列表 ========== -->
-        <section class="page active" data-page="tunnels">
-          <header class="page-head">
-            <h2>隧道</h2>
-            <p>集中管理 SSH 隧道：反向 <code>ssh -R</code> / 本地 <code>ssh -L</code> / 动态 <code>ssh -D</code>，断线自动重连</p>
-          </header>
-
-          <div class="list-head">
-            <span class="hint" id="tunnel-count"></span>
-            <button type="button" id="new-tunnel" class="primary">＋ 新建隧道</button>
-          </div>
-          <div id="tunnel-empty" class="card hidden">
-            <div class="hint" style="min-height: 0; margin: 4px 0">
-              还没有隧道。点击「新建隧道」，从场景预设开始 —— 服务器借 VPN 出网、暴露本地服务、访问服务器内网……
-            </div>
-          </div>
-          <div id="tunnel-list"></div>
-        </section>
-
-        <!-- ========== 服务器档案 ========== -->
-        <section class="page" data-page="servers">
+      <div class="main">
+        <!-- ========== 中列: 服务器块 (Termius 式, 服务器页显示) ========== -->
+        <section class="hosts-col page" data-page="servers">
           <header class="page-head">
             <h2>服务器</h2>
-            <p>保存常用服务器配置，新建隧道时选用（密码不保存）</p>
+            <p>点选服务器管理其隧道；块上 ▶ 一键启动</p>
           </header>
+          <div id="host-grid"></div>
+        </section>
 
-          <div class="card">
-            <h3>添加 / 编辑</h3>
-            <form id="profile-form" class="form-grid">
+        <!-- ========== 右列: 内容区 (总览 / 默认值 / 服务器详情面板) ========== -->
+        <main class="content">
+
+          <!-- 总览: 全部隧道 -->
+          <section class="page" data-page="tunnels">
+            <header class="page-head">
+              <h2>总览</h2>
+              <p>全部隧道的状态总账 —— 反向 <code>ssh -R</code> / 本地 <code>ssh -L</code> / 动态 <code>ssh -D</code>，断线自动重连</p>
+            </header>
+            <div class="list-head">
+              <span class="hint" id="tunnel-count"></span>
+            </div>
+            <div id="tunnel-empty" class="card hidden">
+              <div class="hint" style="min-height: 0; margin: 4px 0">
+                还没有隧道。到「服务器」页选择服务器，从场景开始 —— 服务器借 VPN 出网、暴露本地服务、访问服务器内网……
+              </div>
+              <div class="actions" style="margin-top: 10px">
+                <button type="button" id="goto-servers" class="primary">去服务器页</button>
+              </div>
+            </div>
+            <div id="tunnel-list"></div>
+          </section>
+
+          <!-- 默认值: 新隧道继承的重连策略 + 应用开机自启 -->
+          <section class="page" data-page="defaults">
+            <header class="page-head">
+              <h2>默认值</h2>
+              <p>所有服务器共享；仅影响之后新建的隧道，已有隧道的策略不变</p>
+            </header>
+
+            <div class="card">
+              <h3>重连默认值 <span class="card-sub">新建隧道时继承</span></h3>
+              <div class="form-grid">
+                <label class="check-label">
+                  <input type="checkbox" id="def-auto" checked />
+                  <span>新隧道自动重连</span>
+                </label>
+                <span></span>
+                <label>
+                  <span>快试次数 (断线先 N×1s 快试)</span>
+                  <input id="def-fast" type="number" value="3" min="0" max="10" />
+                </label>
+                <label>
+                  <span>退避封顶 (秒)</span>
+                  <input id="def-max" type="number" value="30" min="1" max="600" />
+                </label>
+              </div>
+              <div class="actions">
+                <button type="button" id="def-save">保存默认值</button>
+              </div>
+            </div>
+
+            <div class="card">
+              <h3>开机自启 <span class="card-sub">随系统启动 · 后台运行</span></h3>
+              <label class="check-label">
+                <input type="checkbox" id="autostart" />
+                <span>系统启动时自动运行 proxyTool</span>
+              </label>
+              <div class="hint">
+                启动后隐藏到托盘（点击托盘图标显示主窗口，关闭按钮也是收进托盘）。
+                需同时勾选隧道行的「自启」，且档案为<b>未加密私钥</b>认证，隧道才会免交互自动连接；
+                密码认证的隧道需打开窗口手动启动。
+              </div>
+            </div>
+          </section>
+
+          <!-- 服务器详情面板 (多态: 空态 / 详情 / 服务器表单 / 选场景 / 隧道表单) -->
+          <aside class="detail-pane page" data-page="servers">
+
+            <!-- 空态 -->
+            <div id="detail-empty" class="dp-view">
+              <div class="dp-empty">
+                <p>选择左侧服务器查看详情</p>
+                <p class="hint">点块上的 <b>▶</b> 可一键启动其全部自启隧道；没有服务器就先「+ 新建」。</p>
+              </div>
+            </div>
+
+            <!-- 服务器详情 -->
+            <div id="server-detail" class="dp-view hidden">
+              <div id="pd-head"></div>
+              <div id="pd-pwbar" class="pw-bar hidden"></div>
+              <div class="list-head">
+                <span class="field-title">隧道</span>
+                <button type="button" id="pd-new-tunnel" class="primary">＋ 新建隧道</button>
+              </div>
+              <div id="pd-tunnels"></div>
+              <div id="pd-fingerprint"></div>
+            </div>
+
+            <!-- 服务器表单 (新建/编辑) -->
+            <form id="server-form" class="dp-view hidden">
+              <div class="dp-head">
+                <button type="button" id="sf-back" class="icon-btn" title="返回">←</button>
+                <h3 id="sf-title">新建服务器</h3>
+              </div>
               <input type="hidden" id="profile-id" />
               <label>
                 <span>名称</span>
@@ -69,125 +145,102 @@
                 <span>服务器地址</span>
                 <input id="profile-host" type="text" placeholder="203.0.113.20" />
               </label>
-              <label>
-                <span>SSH 端口</span>
-                <input id="profile-port" type="number" value="22" min="1" max="65535" />
-              </label>
-              <label>
-                <span>用户名</span>
-                <input id="profile-user" type="text" placeholder="tester" />
-              </label>
+              <div class="form-grid">
+                <label>
+                  <span>SSH 端口</span>
+                  <input id="profile-port" type="number" value="22" min="1" max="65535" />
+                </label>
+                <label>
+                  <span>用户名</span>
+                  <input id="profile-user" type="text" placeholder="tester" />
+                </label>
+              </div>
               <label>
                 <span>私钥路径 (选填)</span>
                 <input id="profile-key" type="text" placeholder="C:\Users\you\.ssh\id_ed25519" />
               </label>
-              <div class="hint" style="min-height:0;margin:4px 0">
+              <div class="hint" style="min-height: 0; margin: 4px 0">
                 填写私钥路径则用密钥认证 (公钥需已加入服务器 authorized_keys)，密码框此时充当密钥口令；留空用密码认证。
               </div>
               <div class="actions">
                 <button type="submit" class="primary">保存</button>
-                <button type="button" id="profile-clear">清空表单</button>
+                <button type="button" id="sf-cancel">取消</button>
               </div>
             </form>
-          </div>
 
-          <div class="card">
-            <h3>已保存的服务器</h3>
-            <div id="profile-list"></div>
-          </div>
-
-          <div class="card">
-            <h3>已记住的服务器指纹 <span class="card-sub">TOFU · 首次连接自动记住</span></h3>
-            <div id="known-hosts-list"></div>
-            <div class="hint">指纹变更的连接会被拒绝（可能是服务器重装或中间人攻击）。确认服务器确已变更时，清除记录后重连即可重新记住。</div>
-          </div>
-
-          <div class="card">
-            <h3>开机自启 <span class="card-sub">随系统启动 · 后台运行</span></h3>
-            <label class="check-label">
-              <input type="checkbox" id="autostart" />
-              <span>系统启动时自动运行 proxyTool</span>
-            </label>
-            <div class="hint">
-              启动后隐藏到托盘（点击托盘图标显示主窗口，关闭按钮也是收进托盘）。
-              需同时勾选隧道行的「自启」，且档案为<b>未加密私钥</b>认证，隧道才会免交互自动连接；
-              密码认证的隧道需打开窗口手动启动。
+            <!-- 新建隧道: 选场景 (预设 + 自定义 + 我的场景) -->
+            <div id="scenario-pick" class="dp-view hidden">
+              <div class="dp-head">
+                <button type="button" id="sp-back" class="icon-btn" title="返回">←</button>
+                <h3 id="sp-title">新建隧道 — 选择场景</h3>
+              </div>
+              <div class="field-title">场景预设</div>
+              <div id="preset-cards" class="preset-grid one"></div>
+              <div id="my-scenarios-wrap">
+                <div class="field-title">我的场景</div>
+                <div id="scenario-cards" class="preset-grid one"></div>
+                <div id="scenario-empty-hint" class="hint" style="min-height: 0">
+                  还没有保存的场景 —— 建隧道时勾选「存为我的场景」，或隧道行点「存为场景」。
+                </div>
+              </div>
             </div>
-          </div>
 
-          <div class="card">
-            <h3>默认值 <span class="card-sub">所有服务器共享 · 新建隧道时继承</span></h3>
-            <div class="form-grid">
+            <!-- 新建隧道: 表单 (kind/backend 驱动) -->
+            <form id="tunnel-form" class="dp-view hidden">
+              <div class="dp-head">
+                <button type="button" id="tf-back" class="icon-btn" title="重选场景">←</button>
+                <h3 id="tf-title">新建隧道</h3>
+              </div>
+
+              <label>
+                <span>名称</span>
+                <input id="wz-name" type="text" placeholder="隧道名称" />
+              </label>
+
+              <div class="field-title">隧道形态</div>
+              <div id="tf-kind" class="seg">
+                <label class="seg-item"><input type="radio" name="tf-kind" value="reverse" /><span>反向 -R</span></label>
+                <label class="seg-item"><input type="radio" name="tf-kind" value="local" /><span>本地 -L</span></label>
+                <label class="seg-item"><input type="radio" name="tf-kind" value="dynamic" /><span>动态 -D</span></label>
+              </div>
+
+              <div id="tf-backend-wrap" class="hidden">
+                <div class="field-title">本机落地 (反向隧道的流量去向)</div>
+                <div class="seg">
+                  <label class="seg-item"><input type="radio" name="tf-backend" value="socksAuto" /><span>本机 SOCKS (VPN)</span></label>
+                  <label class="seg-item"><input type="radio" name="tf-backend" value="tcp" /><span>固定地址</span></label>
+                </div>
+              </div>
+
+              <div id="wz-fields" class="form-grid"></div>
+              <div class="hint" id="wz-hint"></div>
+
+              <div class="form-grid">
+                <label>
+                  <span id="wz-password-label">密码 (仅本次会话内存, 不保存)</span>
+                  <input id="wz-password" type="password" autocomplete="off" />
+                </label>
+                <label class="check-label">
+                  <input type="checkbox" id="wz-auto" checked />
+                  <span>自动重连</span>
+                </label>
+              </div>
+
               <label class="check-label">
-                <input type="checkbox" id="def-auto" checked />
-                <span>新隧道自动重连</span>
+                <input type="checkbox" id="wz-save-scenario" />
+                <span>存为我的场景 (下次新建直接复用)</span>
               </label>
-              <label>
-                <span>快试次数 (断线先 N×1s 快试)</span>
-                <input id="def-fast" type="number" value="3" min="0" max="10" />
-              </label>
-              <label>
-                <span>退避封顶 (秒)</span>
-                <input id="def-max" type="number" value="30" min="1" max="600" />
-              </label>
-            </div>
-            <div class="actions">
-              <button type="button" id="def-save">保存默认值</button>
-            </div>
-            <div class="hint">仅影响之后新建的隧道；已有隧道的策略不变。</div>
-          </div>
-        </section>
+              <input id="wz-scenario-name" type="text" placeholder="场景名称 (默认同隧道名)" class="hidden" />
 
-      </main>
-    </div>
+              <div class="actions">
+                <button type="button" id="wz-save">仅保存</button>
+                <button type="submit" class="primary">保存并启动</button>
+              </div>
+              <div class="hint" id="wz-error" style="color: var(--danger)"></div>
+            </form>
 
-    <!-- ===================== 新建隧道向导 ===================== -->
-    <div id="wizard" class="modal hidden">
-      <div class="modal-card">
-        <div class="modal-head">
-          <h3 id="wizard-title">新建隧道 — 选择场景</h3>
-          <button type="button" id="wizard-close" class="icon-btn" title="关闭">✕</button>
-        </div>
-
-        <!-- 步骤 1: 预设卡片 -->
-        <div id="wizard-step1">
-          <div id="preset-cards" class="preset-grid"></div>
-        </div>
-
-        <!-- 步骤 2: 表单 (预设预填) -->
-        <form id="wizard-form" class="hidden">
-          <div class="form-grid">
-            <label>
-              <span>名称</span>
-              <input id="wz-name" type="text" placeholder="隧道名称" />
-            </label>
-            <label>
-              <span>服务器档案</span>
-              <select id="wz-profile"></select>
-            </label>
-          </div>
-
-          <div id="wz-fields" class="form-grid wizard-fields"></div>
-          <div class="hint" id="wz-hint"></div>
-
-          <div class="form-grid">
-            <label>
-              <span id="wz-password-label">密码 (仅本次会话内存, 不保存)</span>
-              <input id="wz-password" type="password" autocomplete="off" />
-            </label>
-            <label class="check-label">
-              <input type="checkbox" id="wz-auto" checked />
-              <span>自动重连</span>
-            </label>
-          </div>
-
-          <div class="actions">
-            <button type="button" id="wz-back">← 重选场景</button>
-            <button type="button" id="wz-save">仅保存</button>
-            <button type="submit" class="primary">保存并启动</button>
-          </div>
-          <div class="hint" id="wz-error" style="color: var(--danger)"></div>
-        </form>
+          </aside>
+        </main>
       </div>
     </div>
   </body>

@@ -299,6 +299,46 @@ async fn persistence_roundtrip() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// 列表与落盘顺序 = 创建顺序 (注册表 HashMap 无序, order 表保证 UI 稳定);
+/// 删除后其余保持相对顺序, 重启恢复同样有序
+#[tokio::test]
+async fn list_and_persist_preserve_creation_order() {
+    let dir = std::env::temp_dir().join(format!("pt-reg-{}", TunnelSpec::new_id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let registry = Registry::persistent(dir.clone());
+
+    let mut ids = Vec::new();
+    for i in 0..3 {
+        let mut spec = local_spec(free_port());
+        spec.name = format!("顺序-{i}");
+        ids.push(spec.id.clone());
+        registry.create(spec).expect("创建失败");
+    }
+    let listed: Vec<String> = registry.list().into_iter().map(|(s, _)| s.id).collect();
+    assert_eq!(listed, ids, "list 应按创建顺序");
+
+    let saved: Vec<String> = proxy_tool_core::store::load_tunnels(&dir)
+        .into_iter()
+        .map(|s| s.id)
+        .collect();
+    assert_eq!(saved, ids, "tunnels.json 落盘顺序应稳定");
+
+    registry.delete(&ids[1]).await.expect("删除失败");
+    let after: Vec<String> = registry.list().into_iter().map(|(s, _)| s.id).collect();
+    assert_eq!(
+        after,
+        vec![ids[0].clone(), ids[2].clone()],
+        "删除后其余保持相对顺序"
+    );
+
+    // 重启恢复同样有序
+    let registry2 = Registry::persistent(dir.clone());
+    let restored: Vec<String> = registry2.restore().into_iter().map(|s| s.id).collect();
+    assert_eq!(restored, vec![ids[0].clone(), ids[2].clone()]);
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// 运行中删除: 条目移出 + 状态不再可见
 #[tokio::test]
 async fn delete_running_tunnel() {
