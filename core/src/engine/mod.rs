@@ -4,9 +4,6 @@
 //! (store::tunnels.json, 密码永不落盘 —— 启动时只恢复列表, 凭据由调用方
 //! 在 start 时注入)。每条运行中的隧道一个状态机任务 (engine/tunnel.rs,
 //! actor 式: 停止 = 停止标志 + 关闭会话槽, 任务自行收尾退出)。
-//!
-//! 旧 GUI 三页经 `start_legacy` 接入: 固定 id (= 形态 tag), 不持久化,
-//! 前端事件流 (kind 键控) 不变; 新命令面用 uuid id + 持久化。
 
 mod tunnel;
 
@@ -83,8 +80,6 @@ impl SessionSlot {
 /// 注册表内的单条隧道
 struct Entry {
     spec: TunnelSpec,
-    /// false = 旧页面临时隧道 (不落盘)
-    persisted: bool,
     state_tx: watch::Sender<TunnelState>,
     /// 持有接收端: watch 通道在所有 Receiver drop 后关闭, 之后 send 静默失败
     /// (状态会永远停在初值 —— 曾踩过的坑), 注册表查询也用它快照
@@ -107,11 +102,10 @@ impl Entry {
 }
 
 /// 建表条目的公共部分 (spec 之外的运行部件)
-fn new_entry_parts(spec: &TunnelSpec, persisted: bool) -> Entry {
+fn new_entry_parts(spec: &TunnelSpec) -> Entry {
     let (state_tx, state_rx) = watch::channel(TunnelState::Stopped);
     Entry {
         spec: spec.clone(),
-        persisted,
         state_tx,
         state_rx,
         stop: Arc::new(AtomicBool::new(false)),
@@ -158,14 +152,10 @@ impl Registry {
         let specs = store::load_tunnels(dir);
         let mut entries = self.entries.lock().unwrap();
         for spec in specs {
-            let entry = new_entry_parts(&spec, true);
+            let entry = new_entry_parts(&spec);
             entries.insert(spec.id.clone(), entry);
         }
-        let restored: Vec<TunnelSpec> = entries
-            .values()
-            .filter(|e| e.persisted)
-            .map(|e| e.spec.clone())
-            .collect();
+        let restored: Vec<TunnelSpec> = entries.values().map(|e| e.spec.clone()).collect();
         restored
     }
 
@@ -187,7 +177,7 @@ impl Registry {
             if entries.contains_key(&spec.id) {
                 return Err(format!("隧道 id 已存在: {}", spec.id));
             }
-            entries.insert(spec.id.clone(), new_entry_parts(&spec, true));
+            entries.insert(spec.id.clone(), new_entry_parts(&spec));
         }
         self.persist();
         Ok(())
@@ -301,10 +291,7 @@ impl Registry {
                 if let Some(dir) = &dir {
                     let specs: Vec<TunnelSpec> = {
                         let map = entries.lock().unwrap();
-                        map.values()
-                            .filter(|e| e.persisted)
-                            .map(|e| e.spec.clone())
-                            .collect()
+                        map.values().map(|e| e.spec.clone()).collect()
                     };
                     if let Err(e) = store::save_tunnels(dir, &specs) {
                         eprintln!("[registry] tunnels.json 保存失败: {e}");
@@ -331,57 +318,6 @@ impl Registry {
         Ok(())
     }
 
-    /// 旧页面接入: 固定 id (= kind tag) 的临时隧道, 不落盘。
-    /// 同 id 已存在 (含运行中) 则先替换 —— 旧页面「连接 = 新参数重建」语义。
-    pub async fn start_legacy(
-        &self,
-        spec: TunnelSpec,
-        creds: SshCreds,
-        events: Arc<dyn TunnelEvents>,
-    ) -> Result<(), String> {
-        spec.validate()?;
-        let id = spec.id.clone();
-        // 同 id 旧隧道: 置停止 + 硬断开, 移出表 (不等退出, 旧任务自然收尾)。
-        // 注意先绑定再 if let: 若直接作 scrutinee, MutexGuard 临时会活到整个
-        // if let 结束 (Rust 2021 语义), 跨 await 持锁会让本协程 !Send。
-        let old = self.entries.lock().unwrap().remove(&id);
-        if let Some(old) = old {
-            old.stop.store(true, Ordering::SeqCst);
-            old.slot.shallow().close_current().await;
-        }
-        let (state_tx, slot, stop, retry_now) = {
-            let mut entries = self.entries.lock().unwrap();
-            let entry = new_entry_parts(&spec, false);
-            let parts = (
-                entry.state_tx.clone(),
-                entry.slot.shallow(),
-                entry.stop.clone(),
-                entry.retry_now.clone(),
-            );
-            entries.insert(id.clone(), entry);
-            parts
-        };
-        let on_bound_port = self.bound_port_updater(&id, &events);
-        let task = tokio::spawn(tunnel::run_task(
-            spec,
-            creds,
-            slot,
-            stop,
-            retry_now,
-            state_tx,
-            self.backend.clone(),
-            events,
-            on_bound_port,
-        ));
-        self.entries
-            .lock()
-            .unwrap()
-            .get_mut(&id)
-            .expect("legacy 条目刚插入")
-            .task = Some(task);
-        Ok(())
-    }
-
     /// 落盘全部持久化隧道 (legacy 除外)
     fn persist(&self) {
         let Some(dir) = &self.dir else {
@@ -389,11 +325,7 @@ impl Registry {
         };
         let specs: Vec<TunnelSpec> = {
             let entries = self.entries.lock().unwrap();
-            entries
-                .values()
-                .filter(|e| e.persisted)
-                .map(|e| e.spec.clone())
-                .collect()
+            entries.values().map(|e| e.spec.clone()).collect()
         };
         if let Err(e) = store::save_tunnels(dir, &specs) {
             // 持久化失败不阻断运行, 但必须可见 (下次启动列表会丢失)

@@ -4,19 +4,21 @@
 //! - Tauri 命令 (前端 invoke 入口) + AppState (注册表 + 档案)
 //! - `TauriEmitter`: 把引擎事件 (TunnelEvents) 转发为 Tauri 事件给 WebView
 //!
-//! 两套命令面并存 (P3 迁移期):
-//! - 旧三页 `connect_tunnel/connect_local/connect_dynamic`: 内部经
-//!   `Registry::start_legacy` 建立固定 id (= kind tag) 的临时隧道,
-//!   不落盘; 前端事件流 (kind 键控) 不变
-//! - 新命令 `tunnels_list/tunnel_create/tunnel_start/tunnel_stop/tunnel_delete`:
-//!   uuid id, 持久化 (tunnels.json), 供 P5 新 UI 使用
+//! 命令面 (P5, 旧三页兼容命令已移除):
+//! - 隧道: `tunnels_list/tunnel_create/tunnel_start/tunnel_stop/tunnel_retry_now/tunnel_delete`
+//! - 预设向导: `presets_list/tunnel_from_preset`
+//! - 档案: `list_profiles/save_profile/delete_profile` + 分层默认值
+//!   `profile_defaults_get/profile_defaults_save`
+//! - 场景动作: `verify_remote_tunnel/deploy_wrapper` (vpn_share 预设附带)
+//! - 工具: `probe_local_proxy`
 //!
-//! 事件格式与旧版兼容 (新增 id 字段): `tunnel-status {id,kind,state,message?}` / `tunnel-log {id,kind,msg}`。
+//! 事件: `tunnel-status {id,kind,state,message?}` / `tunnel-log {id,kind,msg}`
+//! (前端按 id 键控; kind tag 保留兼容)。
 
 use std::sync::Arc;
 
 use proxy_tool_core::engine::{Registry, SshCreds};
-use proxy_tool_core::model::{Backend, ReconnectPolicy, TunnelKind, TunnelSpec, TunnelState};
+use proxy_tool_core::model::{TunnelKind, TunnelSpec, TunnelState};
 use proxy_tool_core::{presets, probe, profiles, ssh, store, TunnelEvents};
 use serde::Serialize;
 use tauri::Manager;
@@ -92,159 +94,12 @@ fn data_dir(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
         .map_err(|e| format!("获取应用数据目录失败: {e}"))
 }
 
-/// 日志便捷函数 (命令层直接发, 不经过引擎)
-fn events_log(app: &tauri::AppHandle, kind: &str, msg: &str) {
-    TauriEmitter(app.clone()).log(kind, kind, msg);
+/// 日志便捷函数 (命令层直接发, 不经过引擎; 发到指定隧道的日志流)
+fn events_log(app: &tauri::AppHandle, id: &str, msg: &str) {
+    TauriEmitter(app.clone()).log(id, "remote", msg);
 }
 
-// ---------- 旧页面命令 (兼容适配, P5 移除) ----------
-
-/// 命令: 建立反向隧道 (旧「反向隧道」页; 内部经注册表, 固定 id "remote")
-#[tauri::command]
-async fn connect_tunnel(
-    app: tauri::AppHandle,
-    state: tauri::State<'_, AppState>,
-    server_host: String,
-    server_port: u16,
-    username: String,
-    password: String,
-    remote_port: u32,
-    local_proxy_port: u16,
-    auto_reconnect: bool,
-) -> Result<(), String> {
-    let port: u16 = remote_port
-        .try_into()
-        .map_err(|_| format!("端口 {remote_port} 超出范围 (0-65535)"))?;
-    let spec = TunnelSpec {
-        id: "remote".into(), // 旧页面固定 id = kind tag
-        name: "反向隧道".into(),
-        enabled: false,
-        profile_id: "legacy".into(), // 临时隧道, 不落盘
-        kind: TunnelKind::Reverse {
-            bind: "127.0.0.1".into(),
-            port,
-        },
-        backend: Backend::SocksAuto {
-            fallback_port: local_proxy_port,
-        },
-        policy: ReconnectPolicy {
-            auto: auto_reconnect,
-            ..ReconnectPolicy::default()
-        },
-    };
-    let creds = SshCreds {
-        host: server_host,
-        port: server_port,
-        username,
-        password,
-    };
-    state
-        .registry
-        .start_legacy(spec, creds, emitter(&app))
-        .await
-}
-
-/// 命令: 断开反向隧道
-#[tauri::command]
-async fn disconnect_tunnel(state: tauri::State<'_, AppState>) -> Result<(), String> {
-    state.registry.stop("remote").await
-}
-
-/// 命令: 建立本地端口转发 (旧「本地转发」页; 固定 id "local")
-#[tauri::command]
-async fn connect_local(
-    app: tauri::AppHandle,
-    state: tauri::State<'_, AppState>,
-    server_host: String,
-    server_port: u16,
-    username: String,
-    password: String,
-    listen_port: u16,
-    target_host: String,
-    target_port: u16,
-    auto_reconnect: bool,
-) -> Result<(), String> {
-    let spec = TunnelSpec {
-        id: "local".into(),
-        name: "本地转发".into(),
-        enabled: false,
-        profile_id: "legacy".into(),
-        kind: TunnelKind::Local {
-            bind: "127.0.0.1".into(),
-            port: listen_port,
-            target_host,
-            target_port,
-        },
-        backend: Backend::default(),
-        policy: ReconnectPolicy {
-            auto: auto_reconnect,
-            ..ReconnectPolicy::default()
-        },
-    };
-    let creds = SshCreds {
-        host: server_host,
-        port: server_port,
-        username,
-        password,
-    };
-    state
-        .registry
-        .start_legacy(spec, creds, emitter(&app))
-        .await
-}
-
-/// 命令: 断开本地转发
-#[tauri::command]
-async fn disconnect_local(state: tauri::State<'_, AppState>) -> Result<(), String> {
-    state.registry.stop("local").await
-}
-
-/// 命令: 建立动态隧道 (旧「动态隧道」页; 固定 id "dynamic")
-#[tauri::command]
-async fn connect_dynamic(
-    app: tauri::AppHandle,
-    state: tauri::State<'_, AppState>,
-    server_host: String,
-    server_port: u16,
-    username: String,
-    password: String,
-    listen_port: u16,
-    auto_reconnect: bool,
-) -> Result<(), String> {
-    let spec = TunnelSpec {
-        id: "dynamic".into(),
-        name: "动态隧道".into(),
-        enabled: false,
-        profile_id: "legacy".into(),
-        kind: TunnelKind::Dynamic {
-            bind: "127.0.0.1".into(),
-            port: listen_port,
-        },
-        backend: Backend::default(),
-        policy: ReconnectPolicy {
-            auto: auto_reconnect,
-            ..ReconnectPolicy::default()
-        },
-    };
-    let creds = SshCreds {
-        host: server_host,
-        port: server_port,
-        username,
-        password,
-    };
-    state
-        .registry
-        .start_legacy(spec, creds, emitter(&app))
-        .await
-}
-
-/// 命令: 断开动态隧道
-#[tauri::command]
-async fn disconnect_dynamic(state: tauri::State<'_, AppState>) -> Result<(), String> {
-    state.registry.stop("dynamic").await
-}
-
-// ---------- 新命令面 (P5 新 UI 使用; 与旧并存) ----------
+// ---------- 隧道命令面 ----------
 
 /// 隧道 DTO (spec 展开 + 状态), 状态词汇与前端一致
 #[derive(Serialize, Clone)]
@@ -380,17 +235,51 @@ fn presets_list() -> Vec<PresetDto> {
         .collect()
 }
 
-/// 命令: 按预设生成隧道模板 (表单预填; 用户改端口/目标后 tunnel_create)
+/// 命令: 按预设生成隧道模板 (表单预填; 重连策略继承档案层默认值)
 #[tauri::command]
-fn tunnel_from_preset(
+async fn tunnel_from_preset(
+    state: tauri::State<'_, AppState>,
     preset_id: String,
     name: String,
     profile_id: String,
 ) -> Result<TunnelSpec, String> {
-    presets::template(&preset_id, &name, &profile_id)
+    let mut spec = presets::template(&preset_id, &name, &profile_id)?;
+    // 分层默认值: 档案层的重连策略覆盖模板内置默认 (向导表单仍可再改)
+    if let Some(reconnect) = state.profile_store.lock().await.defaults.reconnect.clone() {
+        spec.policy = reconnect;
+    }
+    Ok(spec)
 }
 
-// ---------- 既有单页命令 (保持) ----------
+// ---------- 场景动作 (vpn_share 预设附带; 反向隧道需已连接) ----------
+
+/// 反向隧道 → (档案 host/port/username, 服务器监听端口[含 -R 0 回填值])。
+/// 验证/部署命令据此免传全套连接参数 (密码除外, 不落盘)。
+async fn resolve_reverse(
+    state: &tauri::State<'_, AppState>,
+    id: &str,
+) -> Result<(String, u16, String, u32), String> {
+    let spec = state
+        .registry
+        .list()
+        .into_iter()
+        .find(|(s, _)| &s.id == id)
+        .map(|(s, _)| s)
+        .ok_or_else(|| format!("隧道不存在: {id}"))?;
+    let TunnelKind::Reverse { port, .. } = spec.kind else {
+        return Err("仅反向隧道支持此操作".into());
+    };
+    let profile = {
+        let store_guard = state.profile_store.lock().await;
+        store_guard
+            .profiles
+            .iter()
+            .find(|p| p.id == spec.profile_id)
+            .cloned()
+            .ok_or_else(|| format!("隧道关联的档案不存在 (id: {})", spec.profile_id))?
+    };
+    Ok((profile.host, profile.port, profile.username, port as u32))
+}
 
 /// 探测本地代理端口的结果
 #[derive(Serialize, Clone)]
@@ -413,29 +302,28 @@ async fn probe_local_proxy() -> Result<Vec<ProbeResultPayload>, String> {
 }
 
 /// 命令: 验证反向隧道端到端可用性 (需已连接)。
-/// 在服务器上分别测试 直连 与 经隧道 (socks5h://127.0.0.1:<remote_port>) 访问 google。
+/// 在服务器上分别测试 直连 与 经隧道 (socks5-hostname 127.0.0.1:<端口>) 访问 google。
 #[tauri::command]
 async fn verify_remote_tunnel(
     app: tauri::AppHandle,
-    server_host: String,
-    server_port: u16,
-    username: String,
+    state: tauri::State<'_, AppState>,
+    id: String,
     password: String,
-    remote_port: u32,
 ) -> Result<String, String> {
+    let (host, port, username, remote_port) = resolve_reverse(&state, &id).await?;
     let cmd = format!(
         "echo '--- 直连(不经隧道) ---'; curl -s -o /dev/null -m 8 -w '直连: http_code=%{{http_code}} time=%{{time_total}}s\\n' https://www.google.com || echo '直连失败(预期: 服务器网络无法访问被墙站点)'; echo '--- 经隧道 ---'; curl -s -o /dev/null -m 10 -w '隧道: http_code=%{{http_code}} time=%{{time_total}}s\\n' --socks5-hostname 127.0.0.1:{remote_port} https://www.google.com || echo '隧道访问失败'"
     );
     let out = ssh::remote_exec(
-        &server_host,
-        server_port,
+        &host,
+        port,
         &username,
         &password,
         &cmd,
         std::time::Duration::from_secs(45),
     )
     .await?;
-    events_log(&app, "remote", &format!("验证隧道:\n{out}"));
+    events_log(&app, &id, &format!("验证隧道:\n{out}"));
     Ok(out)
 }
 
@@ -444,12 +332,11 @@ async fn verify_remote_tunnel(
 #[tauri::command]
 async fn deploy_wrapper(
     app: tauri::AppHandle,
-    server_host: String,
-    server_port: u16,
-    username: String,
+    state: tauri::State<'_, AppState>,
+    id: String,
     password: String,
-    remote_port: u32,
 ) -> Result<String, String> {
+    let (host, port, username, remote_port) = resolve_reverse(&state, &id).await?;
     let cmd = format!(
         r#"set -e
 mkdir -p "$HOME/.local/bin"
@@ -472,15 +359,15 @@ fi"#,
         remote_port = remote_port
     );
     let out = ssh::remote_exec(
-        &server_host,
-        server_port,
+        &host,
+        port,
         &username,
         &password,
         &cmd,
         std::time::Duration::from_secs(30),
     )
     .await?;
-    events_log(&app, "remote", &format!("部署 proxy wrapper:\n{out}"));
+    events_log(&app, &id, &format!("部署 proxy wrapper:\n{out}"));
     Ok(out)
 }
 
@@ -524,6 +411,27 @@ async fn delete_profile(
     Ok(store_guard.profiles.clone())
 }
 
+/// 命令: 读取分层默认值 (档案层, 所有档案共享)
+#[tauri::command]
+async fn profile_defaults_get(
+    state: tauri::State<'_, AppState>,
+) -> Result<store::ProfileDefaults, String> {
+    Ok(state.profile_store.lock().await.defaults.clone())
+}
+
+/// 命令: 保存分层默认值 (档案层); 新建隧道 (预设模板) 生成时继承
+#[tauri::command]
+async fn profile_defaults_save(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+    defaults: store::ProfileDefaults,
+) -> Result<store::ProfileDefaults, String> {
+    let mut store_guard = state.profile_store.lock().await;
+    store_guard.defaults = defaults;
+    store::save_profiles(&data_dir(&app)?, &store_guard)?;
+    Ok(store_guard.defaults.clone())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -559,12 +467,6 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .invoke_handler(tauri::generate_handler![
             probe_local_proxy,
-            connect_tunnel,
-            disconnect_tunnel,
-            connect_local,
-            disconnect_local,
-            connect_dynamic,
-            disconnect_dynamic,
             verify_remote_tunnel,
             deploy_wrapper,
             tunnels_list,
@@ -578,6 +480,8 @@ pub fn run() {
             list_profiles,
             save_profile,
             delete_profile,
+            profile_defaults_get,
+            profile_defaults_save,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

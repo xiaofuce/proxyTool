@@ -1,8 +1,8 @@
 //! 隧道引擎 headless 测试: 注册表 + 状态机任务 + 事件序列
 //!
-//! 覆盖 P3 验收核心: 生命周期 (Starting→Running→Stopped)、致命错误立即停
+//! 覆盖: 生命周期 (Starting→Running→Stopped)、致命错误立即停
 //! (错误密码不进退避, 事件流断言)、持久化往返 (tunnels.json 恢复)、
-//! 旧页面适配隧道不落盘。
+//! 网络掉线快试重连、retry_now 跳过退避。
 //! 连接类用例打真实测试服务器 (同 e2e_direct 模式, 目标 = 服务器自身 22 端口)。
 
 use std::sync::Arc;
@@ -201,9 +201,9 @@ async fn wrong_password_stops_without_retry() {
     );
 }
 
-/// 持久化: create 落盘 → 新 Registry restore 恢复列表; legacy 隧道不落盘
+/// 持久化: create 落盘 → 新 Registry restore 恢复列表 (Stopped 起点)
 #[tokio::test]
-async fn persistence_roundtrip_and_legacy_excluded() {
+async fn persistence_roundtrip() {
     let dir = std::env::temp_dir().join(format!("pt-reg-{}", TunnelSpec::new_id()));
     std::fs::create_dir_all(&dir).unwrap();
 
@@ -212,39 +212,8 @@ async fn persistence_roundtrip_and_legacy_excluded() {
     let id = spec.id.clone();
     registry.create(spec).expect("创建失败");
 
-    // legacy 隧道 (打不可达地址, 任务进退避也无妨 —— 只验证不落盘)
-    let legacy = TunnelSpec {
-        id: "local".into(), // 旧页面固定 id = kind tag
-        name: "旧页面隧道".into(),
-        enabled: false,
-        profile_id: "legacy".into(),
-        kind: TunnelKind::Local {
-            bind: "127.0.0.1".into(),
-            port: free_port(),
-            target_host: "127.0.0.1".into(),
-            target_port: 1,
-        },
-        backend: Backend::default(),
-        policy: ReconnectPolicy::default(),
-    };
-    let events: Arc<dyn TunnelEvents> = Arc::new(Collector::default());
-    registry
-        .start_legacy(
-            legacy,
-            SshCreds {
-                host: "127.0.0.1".into(),
-                port: 1,
-                username: "x".into(),
-                password: "x".into(),
-            },
-            events,
-        )
-        .await
-        .expect("legacy 启动失败");
-
-    // 文件里只有持久化隧道
     let saved = proxy_tool_core::store::load_tunnels(&dir);
-    assert_eq!(saved.len(), 1, "legacy 不落盘: {saved:?}");
+    assert_eq!(saved.len(), 1);
     assert_eq!(saved[0].id, id);
 
     // 重启恢复

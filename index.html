@@ -17,17 +17,9 @@
           <div class="brand-sub">SSH 隧道工具</div>
         </div>
         <nav class="nav">
-          <button class="nav-item active" data-page="remote">
-            <span class="nav-icon">⇄</span><span class="nav-label">反向隧道</span>
-            <span class="nav-dot" id="dot-remote"></span>
-          </button>
-          <button class="nav-item" data-page="local">
-            <span class="nav-icon">➔</span><span class="nav-label">本地转发</span>
-            <span class="nav-dot" id="dot-local"></span>
-          </button>
-          <button class="nav-item" data-page="dynamic">
-            <span class="nav-icon">◎</span><span class="nav-label">动态隧道</span>
-            <span class="nav-dot" id="dot-dynamic"></span>
+          <button class="nav-item active" data-page="tunnels">
+            <span class="nav-icon">⇄</span><span class="nav-label">隧道</span>
+            <span class="nav-dot" id="dot-tunnels"></span>
           </button>
           <button class="nav-item" data-page="servers">
             <span class="nav-icon">▤</span><span class="nav-label">服务器</span>
@@ -39,193 +31,30 @@
       <!-- ===================== 内容区 ===================== -->
       <main class="content">
 
-        <!-- ========== 反向隧道 ========== -->
-        <section class="page active" data-page="remote">
+        <!-- ========== 隧道列表 ========== -->
+        <section class="page active" data-page="tunnels">
           <header class="page-head">
-            <h2>反向隧道</h2>
-            <p>远程服务器借用本机 VPN 访问外网 <code>ssh -R</code></p>
+            <h2>隧道</h2>
+            <p>集中管理 SSH 隧道：反向 <code>ssh -R</code> / 本地 <code>ssh -L</code> / 动态 <code>ssh -D</code>，断线自动重连</p>
           </header>
 
-          <div class="card">
-            <h3>服务器</h3>
-            <div class="form-grid">
-              <label>
-                <span>服务器地址</span>
-                <input id="server-host-remote" type="text" placeholder="203.0.113.20" value="203.0.113.20" />
-              </label>
-              <label>
-                <span>SSH 端口</span>
-                <input id="server-port-remote" type="number" value="22" min="1" max="65535" />
-              </label>
-              <label>
-                <span>用户名</span>
-                <input id="username-remote" type="text" placeholder="tester" value="tester" />
-              </label>
-              <label>
-                <span>密码</span>
-                <input id="password-remote" type="password" placeholder="SSH 登录密码" autocomplete="off" />
-              </label>
+          <div class="list-head">
+            <span class="hint" id="tunnel-count"></span>
+            <button type="button" id="new-tunnel" class="primary">＋ 新建隧道</button>
+          </div>
+          <div id="tunnel-empty" class="card hidden">
+            <div class="hint" style="min-height: 0; margin: 4px 0">
+              还没有隧道。点击「新建隧道」，从场景预设开始 —— 服务器借 VPN 出网、暴露本地服务、访问服务器内网……
             </div>
           </div>
-
-          <div class="card">
-            <h3>隧道参数</h3>
-            <div class="form-grid">
-              <label>
-                <span>服务器监听端口</span>
-                <input id="remote-port" type="number" value="1081" min="1" max="65535" />
-              </label>
-              <label>
-                <span>本机代理端口 (VPN SOCKS)</span>
-                <div class="port-row">
-                  <input id="local-proxy-port" type="number" value="7892" min="1" max="65535" />
-                  <button type="button" id="probe-btn" title="自动探测本机 SOCKS 代理端口">探测</button>
-                </div>
-              </label>
-            </div>
-            <div class="hint" id="probe-result"></div>
-          </div>
-
-          <div class="card">
-            <h3>操作</h3>
-            <div class="status-row"><span id="status-remote" class="badge idle">未连接</span><label class="ar-label"><input type="checkbox" id="autoreconnect-remote" checked /> 自动重连</label></div>
-            <form id="form-remote" class="actions">
-              <button type="submit" id="connect-remote" class="primary">连接</button>
-              <button type="button" id="disconnect-remote" disabled>断开</button>
-              <button type="button" id="verify-remote" disabled title="在服务器上经隧道测试访问外网 (google)">验证外网</button>
-              <button type="button" id="deploy-remote" disabled title="部署 proxy 命令, 服务器上可 'proxy curl ...' 走隧道">部署 proxy</button>
-            </form>
-          </div>
-
-          <div class="card">
-            <h3>日志</h3>
-            <pre id="log-remote" class="log"></pre>
-          </div>
+          <div id="tunnel-list"></div>
         </section>
 
-        <!-- ========== 本地转发 ========== -->
-        <section class="page" data-page="local">
-          <header class="page-head">
-            <h2>本地转发</h2>
-            <p>本机访问远程服务器上的服务 <code>ssh -L</code>，如远程 MySQL / Web</p>
-          </header>
-
-          <div class="card">
-            <h3>服务器</h3>
-            <div class="form-grid">
-              <label>
-                <span>服务器地址</span>
-                <input id="server-host-local" type="text" placeholder="203.0.113.20" value="203.0.113.20" />
-              </label>
-              <label>
-                <span>SSH 端口</span>
-                <input id="server-port-local" type="number" value="22" min="1" max="65535" />
-              </label>
-              <label>
-                <span>用户名</span>
-                <input id="username-local" type="text" placeholder="tester" value="tester" />
-              </label>
-              <label>
-                <span>密码</span>
-                <input id="password-local" type="password" placeholder="SSH 登录密码" autocomplete="off" />
-              </label>
-            </div>
-          </div>
-
-          <div class="card">
-            <h3>转发规则</h3>
-            <div class="form-grid">
-              <label>
-                <span>本机监听端口</span>
-                <input id="listen-port-local" type="number" value="3306" min="1" max="65535" />
-              </label>
-              <label>
-                <span>目标主机 (服务器视角)</span>
-                <input id="target-host-local" type="text" placeholder="127.0.0.1" value="127.0.0.1" />
-              </label>
-              <label>
-                <span>目标端口</span>
-                <input id="target-port-local" type="number" value="3306" min="1" max="65535" />
-              </label>
-            </div>
-            <div class="hint">例: 本机 3306 → 服务器 127.0.0.1:3306, 本机 mysql 客户端连 127.0.0.1:3306 即访问服务器 MySQL</div>
-          </div>
-
-          <div class="card">
-            <h3>操作</h3>
-            <div class="status-row"><span id="status-local" class="badge idle">未连接</span><label class="ar-label"><input type="checkbox" id="autoreconnect-local" checked /> 自动重连</label></div>
-            <form id="form-local" class="actions">
-              <button type="submit" id="connect-local" class="primary">连接</button>
-              <button type="button" id="disconnect-local" disabled>断开</button>
-            </form>
-          </div>
-
-          <div class="card">
-            <h3>日志</h3>
-            <pre id="log-local" class="log"></pre>
-          </div>
-        </section>
-
-        <!-- ========== 动态隧道 ========== -->
-        <section class="page" data-page="dynamic">
-          <header class="page-head">
-            <h2>动态隧道</h2>
-            <p>本机经服务器访问其内网任意主机 <code>ssh -D</code> (SOCKS5)</p>
-          </header>
-
-          <div class="card">
-            <h3>服务器</h3>
-            <div class="form-grid">
-              <label>
-                <span>服务器地址</span>
-                <input id="server-host-dynamic" type="text" placeholder="203.0.113.20" value="203.0.113.20" />
-              </label>
-              <label>
-                <span>SSH 端口</span>
-                <input id="server-port-dynamic" type="number" value="22" min="1" max="65535" />
-              </label>
-              <label>
-                <span>用户名</span>
-                <input id="username-dynamic" type="text" placeholder="tester" value="tester" />
-              </label>
-              <label>
-                <span>密码</span>
-                <input id="password-dynamic" type="password" placeholder="SSH 登录密码" autocomplete="off" />
-              </label>
-            </div>
-          </div>
-
-          <div class="card">
-            <h3>隧道参数</h3>
-            <div class="form-grid">
-              <label>
-                <span>本机 SOCKS 监听端口</span>
-                <input id="listen-port-dynamic" type="number" value="1080" min="1" max="65535" />
-              </label>
-            </div>
-            <div class="hint">应用/浏览器配置 SOCKS5 代理 127.0.0.1:1080, 可访问服务器内网任意主机 (DNS 也在服务器侧解析)</div>
-          </div>
-
-          <div class="card">
-            <h3>操作</h3>
-            <div class="status-row"><span id="status-dynamic" class="badge idle">未连接</span><label class="ar-label"><input type="checkbox" id="autoreconnect-dynamic" checked /> 自动重连</label></div>
-            <form id="form-dynamic" class="actions">
-              <button type="submit" id="connect-dynamic" class="primary">连接</button>
-              <button type="button" id="disconnect-dynamic" disabled>断开</button>
-            </form>
-          </div>
-
-          <div class="card">
-            <h3>日志</h3>
-            <pre id="log-dynamic" class="log"></pre>
-          </div>
-        </section>
-
-        <!-- ========== 服务器 ========== -->
+        <!-- ========== 服务器档案 ========== -->
         <section class="page" data-page="servers">
           <header class="page-head">
             <h2>服务器</h2>
-            <p>保存常用服务器配置，一键填入各隧道表单（密码不保存）</p>
+            <p>保存常用服务器配置，新建隧道时选用（密码不保存）</p>
           </header>
 
           <div class="card">
@@ -259,9 +88,81 @@
             <h3>已保存的服务器</h3>
             <div id="profile-list"></div>
           </div>
+
+          <div class="card">
+            <h3>默认值 <span class="card-sub">所有服务器共享 · 新建隧道时继承</span></h3>
+            <div class="form-grid">
+              <label class="check-label">
+                <input type="checkbox" id="def-auto" checked />
+                <span>新隧道自动重连</span>
+              </label>
+              <label>
+                <span>快试次数 (断线先 N×1s 快试)</span>
+                <input id="def-fast" type="number" value="3" min="0" max="10" />
+              </label>
+              <label>
+                <span>退避封顶 (秒)</span>
+                <input id="def-max" type="number" value="30" min="1" max="600" />
+              </label>
+            </div>
+            <div class="actions">
+              <button type="button" id="def-save">保存默认值</button>
+            </div>
+            <div class="hint">仅影响之后新建的隧道；已有隧道的策略不变。</div>
+          </div>
         </section>
 
       </main>
+    </div>
+
+    <!-- ===================== 新建隧道向导 ===================== -->
+    <div id="wizard" class="modal hidden">
+      <div class="modal-card">
+        <div class="modal-head">
+          <h3 id="wizard-title">新建隧道 — 选择场景</h3>
+          <button type="button" id="wizard-close" class="icon-btn" title="关闭">✕</button>
+        </div>
+
+        <!-- 步骤 1: 预设卡片 -->
+        <div id="wizard-step1">
+          <div id="preset-cards" class="preset-grid"></div>
+        </div>
+
+        <!-- 步骤 2: 表单 (预设预填) -->
+        <form id="wizard-form" class="hidden">
+          <div class="form-grid">
+            <label>
+              <span>名称</span>
+              <input id="wz-name" type="text" placeholder="隧道名称" />
+            </label>
+            <label>
+              <span>服务器档案</span>
+              <select id="wz-profile"></select>
+            </label>
+          </div>
+
+          <div id="wz-fields" class="form-grid wizard-fields"></div>
+          <div class="hint" id="wz-hint"></div>
+
+          <div class="form-grid">
+            <label>
+              <span>密码 (仅本次会话内存, 不保存)</span>
+              <input id="wz-password" type="password" autocomplete="off" />
+            </label>
+            <label class="check-label">
+              <input type="checkbox" id="wz-auto" checked />
+              <span>自动重连</span>
+            </label>
+          </div>
+
+          <div class="actions">
+            <button type="button" id="wz-back">← 重选场景</button>
+            <button type="button" id="wz-save">仅保存</button>
+            <button type="submit" class="primary">保存并启动</button>
+          </div>
+          <div class="hint" id="wz-error" style="color: var(--danger)"></div>
+        </form>
+      </div>
     </div>
   </body>
 </html>

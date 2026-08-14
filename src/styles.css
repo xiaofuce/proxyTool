@@ -216,9 +216,24 @@ input {
   font-size: 14px;
 }
 
-input:focus {
+select {
+  width: 100%;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text);
+  font-size: 14px;
+}
+
+input:focus,
+select:focus {
   outline: 2px solid var(--accent);
   border-color: transparent;
+}
+
+.hidden {
+  display: none !important;
 }
 
 .port-row {
@@ -381,4 +396,222 @@ button.danger:hover:not(:disabled) {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* ===================== 隧道列表 ===================== */
+.list-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 12px;
+}
+
+.list-head .hint {
+  margin: 0;
+}
+
+.tunnel-card {
+  padding: 12px 16px;
+}
+
+.tunnel-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  cursor: pointer;
+  user-select: none;
+}
+
+.tunnel-title {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.tunnel-title strong {
+  font-size: 14px;
+}
+
+.tunnel-kind {
+  font-size: 11px;
+  color: var(--accent);
+  border: 1px solid var(--accent);
+  border-radius: 4px;
+  padding: 0 5px;
+  line-height: 18px;
+}
+
+.tunnel-sub {
+  flex-basis: 100%;
+  font-size: 12px;
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tunnel-actions {
+  display: flex;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.tunnel-actions button {
+  padding: 6px 12px;
+  font-size: 12px;
+}
+
+.tunnel-msg {
+  margin: 8px 0 0 28px;
+}
+
+.tunnel-msg-text {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.tunnel-detail {
+  margin-top: 10px;
+}
+
+.tunnel-expand {
+  border: none;
+  background: transparent;
+  padding: 4px 6px;
+  color: var(--muted);
+  transition: transform 0.15s;
+}
+
+.tunnel-expand.open {
+  transform: rotate(90deg);
+}
+
+.pw-bar {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.pw-bar input {
+  flex: 1;
+  max-width: 340px;
+}
+
+/* ===================== 图标按钮 ===================== */
+.icon-btn {
+  border: none;
+  background: transparent;
+  padding: 6px 8px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.icon-btn:hover:not(:disabled) {
+  border: none;
+  color: var(--accent);
+}
+
+/* ===================== 模态框 (新建向导) ===================== */
+.modal {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.45);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 100;
+}
+
+.modal-card {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 18px 20px;
+  width: min(560px, calc(100vw - 40px));
+  max-height: calc(100vh - 60px);
+  overflow-y: auto;
+}
+
+.modal-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 14px;
+}
+
+.modal-head h3 {
+  margin: 0;
+  font-size: 16px;
+}
+
+/* ---------- 预设卡片 ---------- */
+.preset-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+
+.preset-card {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  align-items: flex-start;
+  text-align: left;
+  padding: 14px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: transparent;
+}
+
+.preset-card:hover:not(:disabled) {
+  border-color: var(--accent);
+  color: inherit;
+}
+
+.preset-card strong {
+  font-size: 14px;
+  color: var(--text);
+}
+
+.preset-card span {
+  font-size: 12px;
+  color: var(--muted);
+  line-height: 1.5;
+}
+
+.wizard-fields {
+  margin-top: 12px;
+}
+
+/* ---------- 复选框行 ---------- */
+.check-label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  user-select: none;
+  align-self: end;
+  padding-bottom: 8px;
+}
+
+.check-label input {
+  width: auto;
+  cursor: pointer;
+}
+
+.check-label span {
+  margin: 0;
+  font-size: 13px;
+  color: var(--text);
+}
+
+/* ---------- 卡片小标题 ---------- */
+.card-sub {
+  font-size: 11px;
+  color: var(--muted);
+  font-weight: 400;
+  margin-left: 6px;
 }

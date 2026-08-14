@@ -34,8 +34,7 @@ pub mod tunnel;
 /// GUI 实现: 转发为 Tauri 事件 (tunnel-status / tunnel-log);
 /// 测试实现: 收集到 Vec 断言事件序列。
 ///
-/// `id` 标识隧道 (新命令面 = uuid; 旧页面适配 = 形态 tag, 见 engine::Registry::start_legacy)。
-/// `kind` = 形态 tag (remote/local/dynamic), 迁移期与现有前端事件字段一一对应。
+/// `id` 标识隧道 (uuid); `kind` = 形态 tag (remote/local/dynamic)。
 pub trait TunnelEvents: Send + Sync + 'static {
     /// 隧道状态变化。
     /// state: connecting / connected / reconnecting / disconnected / error
