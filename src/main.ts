@@ -248,6 +248,34 @@ function renderTunnels() {
 
     const actions = document.createElement("div");
     actions.className = "tunnel-actions";
+    // 开机自启开关 (enabled 字段; 系统启动时后台拉起)
+    const autoWrap = document.createElement("label");
+    autoWrap.className = "check-inline";
+    autoWrap.title =
+      "开机自启: 系统启动时后台拉起此隧道 (需私钥认证档案; 密码/加密私钥无法免交互启动)";
+    const autoChk = document.createElement("input");
+    autoChk.type = "checkbox";
+    autoChk.checked = t.enabled;
+    const autoText = document.createElement("span");
+    autoText.textContent = "自启";
+    autoWrap.append(autoChk, autoText);
+    autoChk.addEventListener("change", async () => {
+      try {
+        tunnels = await invoke<TunnelDto[]>("tunnel_set_enabled", {
+          id: t.id,
+          enabled: autoChk.checked,
+        });
+        if (autoChk.checked && profile && !profile.identityFile) {
+          appendLog(
+            t.id,
+            "提示: 该档案为密码认证, 开机自启时无法免交互启动; 建议在服务器页配置私钥路径"
+          );
+        }
+        renderTunnels();
+      } catch (err) {
+        appendLog(t.id, `❌ ${err}`);
+      }
+    });
     const mkBtn = (text: string, cls = "") => {
       const b = document.createElement("button");
       b.type = "button";
@@ -268,7 +296,7 @@ function renderTunnels() {
     const btnDelete = mkBtn("删除", "danger");
     btnDelete.title = "删除隧道配置";
 
-    head.append(expand, title, badge, actions);
+    head.append(expand, title, badge, autoWrap, actions);
     card.append(head);
 
     // --- 状态消息行 (重连进度 / 错误信息) ---
@@ -939,9 +967,29 @@ el<HTMLButtonElement>("def-save").addEventListener("click", async () => {
   }
 });
 
+// ---------- 开机自启 (P6; 经后端命令包装 tauri-plugin-autostart) ----------
+el<HTMLInputElement>("autostart").addEventListener("change", async () => {
+  const cb = el<HTMLInputElement>("autostart");
+  try {
+    await invoke("autostart_set", { enabled: cb.checked });
+  } catch (err) {
+    alert(`设置失败: ${err}`);
+    cb.checked = !cb.checked;
+  }
+});
+
+async function loadAutostart() {
+  try {
+    el<HTMLInputElement>("autostart").checked = await invoke<boolean>("autostart_get");
+  } catch (err) {
+    console.error("读取开机自启状态失败", err);
+  }
+}
+
 // ---------- 初始化 ----------
 (async () => {
   await refreshProfiles();
   await refreshTunnels();
   await loadDefaults();
+  await loadAutostart();
 })().catch((e) => console.error("初始化失败", e));

@@ -464,6 +464,24 @@ button.danger:hover:not(:disabled) {
   font-size: 12px;
 }
 
+/* 隧道行内「自启」开关 (开机自启 enabled) */
+.check-inline {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+  cursor: pointer;
+  font-size: 12px;
+  color: var(--muted);
+  padding: 0 2px;
+  user-select: none;
+}
+
+.check-inline input {
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+
 .tunnel-msg {
   margin: 8px 0 0 28px;
 }

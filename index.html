@@ -103,6 +103,19 @@
           </div>
 
           <div class="card">
+            <h3>开机自启 <span class="card-sub">随系统启动 · 后台运行</span></h3>
+            <label class="check-label">
+              <input type="checkbox" id="autostart" />
+              <span>系统启动时自动运行 proxyTool</span>
+            </label>
+            <div class="hint">
+              启动后隐藏到托盘（点击托盘图标显示主窗口，关闭按钮也是收进托盘）。
+              需同时勾选隧道行的「自启」，且档案为<b>未加密私钥</b>认证，隧道才会免交互自动连接；
+              密码认证的隧道需打开窗口手动启动。
+            </div>
+          </div>
+
+          <div class="card">
             <h3>默认值 <span class="card-sub">所有服务器共享 · 新建隧道时继承</span></h3>
             <div class="form-grid">
               <label class="check-label">

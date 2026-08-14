@@ -18,8 +18,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use proxy_tool_core::known_hosts::KnownHosts;
-use proxy_tool_core::ssh::AuthMethod;
 use proxy_tool_core::socks::start_socks_server;
+use proxy_tool_core::ssh::AuthMethod;
 use proxy_tool_core::transport::python_bridge;
 use proxy_tool_core::tunnel::{run_tunnel, Logger, TunnelConfig};
 use russh::client;

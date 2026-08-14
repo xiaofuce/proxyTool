@@ -284,6 +284,17 @@ async fn persistence_roundtrip() {
         .iter()
         .any(|(s, st)| &s.id == &id && *st == TunnelState::Stopped));
 
+    // set_enabled (开机自启开关): 更新内存 + 落盘, 重启后保持
+    registry2
+        .set_enabled(&id, false)
+        .expect("更新 enabled 失败");
+    assert!(!registry2.list()[0].0.enabled, "内存态应已更新");
+    let registry3 = Registry::persistent(dir.clone());
+    registry3.restore();
+    assert!(!registry3.list()[0].0.enabled, "落盘后重启应保持 false");
+    registry3.set_enabled(&id, true).expect("恢复 enabled 失败");
+    assert!(registry3.list()[0].0.enabled);
+
     // 清理
     let _ = std::fs::remove_dir_all(&dir);
 }

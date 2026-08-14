@@ -319,6 +319,20 @@ impl Registry {
         })
     }
 
+    /// 更新隧道的启用开关 (开机自启动哪些隧道; 运行状态不受影响) + 落盘
+    pub fn set_enabled(&self, id: &str, enabled: bool) -> Result<(), String> {
+        {
+            let mut entries = self.entries.lock().unwrap();
+            entries
+                .get_mut(id)
+                .ok_or_else(|| format!("隧道不存在: {id}"))?
+                .spec
+                .enabled = enabled;
+        }
+        self.persist();
+        Ok(())
+    }
+
     /// 删除隧道 (运行中先停止; 条目移出, 任务自行收尾退出)
     pub async fn delete(&self, id: &str) -> Result<(), String> {
         self.stop(id).await.ok(); // 不存在时下面统一报

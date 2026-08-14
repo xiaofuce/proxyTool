@@ -23,6 +23,7 @@ use proxy_tool_core::model::{TunnelKind, TunnelSpec, TunnelState};
 use proxy_tool_core::{presets, probe, profiles, ssh, store, TunnelEvents};
 use serde::Serialize;
 use tauri::Manager;
+use tauri_plugin_autostart::ManagerExt;
 use tokio::sync::Mutex;
 
 /// 共享应用状态: 隧道注册表 + 服务器档案 (store v2)。
@@ -173,14 +174,14 @@ fn resolve_auth(
     }
 }
 
-/// 命令: 启动隧道 (按 spec.profile_id 查档案; 密码/口令本次注入, 不落盘)
-#[tauri::command]
-async fn tunnel_start(
-    app: tauri::AppHandle,
-    state: tauri::State<'_, AppState>,
-    id: String,
+/// 按档案启动隧道 (tunnel_start 命令与开机自启动共用):
+/// 查关联档案 → 解析认证方式 (密码/口令本次注入) → 注入凭据启动。
+async fn start_by_profile(
+    app: &tauri::AppHandle,
+    id: &str,
     password: Option<String>,
 ) -> Result<(), String> {
+    let state = app.state::<AppState>();
     let spec = state
         .registry
         .list()
@@ -204,7 +205,17 @@ async fn tunnel_start(
         username: profile.username,
         auth,
     };
-    state.registry.start(&id, creds, emitter(&app)).await
+    state.registry.start(&id, creds, emitter(app)).await
+}
+
+/// 命令: 启动隧道 (按 spec.profile_id 查档案; 密码/口令本次注入, 不落盘)
+#[tauri::command]
+async fn tunnel_start(
+    app: tauri::AppHandle,
+    id: String,
+    password: Option<String>,
+) -> Result<(), String> {
+    start_by_profile(&app, &id, password).await
 }
 
 /// 命令: 停止隧道
@@ -227,6 +238,37 @@ async fn tunnel_delete(
 ) -> Result<Vec<TunnelDto>, String> {
     state.registry.delete(&id).await?;
     tunnels_list(state).await
+}
+
+/// 命令: 更新隧道「开机自启」开关 (enabled 字段), 返回最新列表
+#[tauri::command]
+async fn tunnel_set_enabled(
+    state: tauri::State<'_, AppState>,
+    id: String,
+    enabled: bool,
+) -> Result<Vec<TunnelDto>, String> {
+    state.registry.set_enabled(&id, enabled)?;
+    tunnels_list(state).await
+}
+
+// ---------- 开机自启 (P6; tauri-plugin-autostart, Windows 写 HKCU Run 键) ----------
+
+/// 命令: 读开机自启状态
+#[tauri::command]
+fn autostart_get(app: tauri::AppHandle) -> Result<bool, String> {
+    app.autolaunch().is_enabled().map_err(|e| e.to_string())
+}
+
+/// 命令: 设置/取消开机自启 (注册 `--autostart` 参数拉起)
+#[tauri::command]
+fn autostart_set(app: tauri::AppHandle, enabled: bool) -> Result<(), String> {
+    let autolaunch = app.autolaunch();
+    if enabled {
+        autolaunch.enable()
+    } else {
+        autolaunch.disable()
+    }
+    .map_err(|e| e.to_string())
 }
 
 // ---------- 场景预设 (P5 新 UI 向导用) ----------
@@ -503,14 +545,69 @@ async fn profile_defaults_save(
     Ok(store_guard.defaults.clone())
 }
 
+// ---------- 托盘 + 开机自启 (P6) ----------
+
+fn show_main_window(app: &tauri::AppHandle) {
+    if let Some(w) = app.get_webview_window("main") {
+        let _ = w.show();
+        let _ = w.unminimize();
+        let _ = w.set_focus();
+    }
+}
+
+fn toggle_main_window(app: &tauri::AppHandle) {
+    if let Some(w) = app.get_webview_window("main") {
+        if w.is_visible().unwrap_or(false) {
+            let _ = w.hide();
+        } else {
+            show_main_window(app);
+        }
+    }
+}
+
+/// 建托盘: 菜单 (显示/退出) + 左键切换窗口显隐。
+/// 关闭按钮 = 收进托盘 (隧道常驻), 真正退出走托盘菜单「退出」。
+fn setup_tray(app: &tauri::AppHandle) -> Result<(), Box<dyn std::error::Error>> {
+    use tauri::menu::{Menu, MenuItem};
+    use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
+
+    let show = MenuItem::with_id(app, "show", "显示主窗口", true, None::<&str>)?;
+    let quit = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;
+    let menu = Menu::with_items(app, &[&show, &quit])?;
+    TrayIconBuilder::with_id("main")
+        .icon(app.default_window_icon().ok_or("缺少应用图标")?.clone())
+        .tooltip("proxyTool — SSH 隧道")
+        .menu(&menu)
+        .show_menu_on_left_click(false)
+        .on_menu_event(|app, event| match event.id.as_ref() {
+            "show" => show_main_window(app),
+            "quit" => app.exit(0),
+            _ => {}
+        })
+        .on_tray_icon_event(|tray, event| {
+            if matches!(
+                event,
+                TrayIconEvent::Click {
+                    button: MouseButton::Left,
+                    button_state: MouseButtonState::Up,
+                    ..
+                }
+            ) {
+                toggle_main_window(tray.app_handle());
+            }
+        })
+        .build(app)?;
+    Ok(())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .setup(|app| {
             // app_data_dir 需要已初始化的 app handle, 故状态在 setup 里构建 + manage
             // (setup 在 WebView 加载与任何 invoke 之前运行, 命令拿到的 State 必已就绪)
-            let dir =
-                data_dir(app.handle()).map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
+            let handle = app.handle();
+            let dir = data_dir(handle).map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
             std::fs::create_dir_all(&dir)
                 .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
 
@@ -533,9 +630,48 @@ pub fn run() {
                 registry,
                 profile_store: Mutex::new(profile_store),
             });
+
+            setup_tray(handle)?;
+
+            // 开机自启拉起 (--autostart): 隐藏窗口后台启动 enabled 隧道。
+            // 密码档案 / 加密私钥无法免交互认证 → 各自日志说明后跳过。
+            if std::env::args().any(|a| a == "--autostart") {
+                if let Some(w) = handle.get_webview_window("main") {
+                    let _ = w.hide();
+                }
+                let app = handle.clone();
+                tauri::async_runtime::spawn(async move {
+                    let state = app.state::<AppState>();
+                    let enabled_ids: Vec<String> = state
+                        .registry
+                        .list()
+                        .into_iter()
+                        .filter(|(s, _)| s.enabled)
+                        .map(|(s, _)| s.id)
+                        .collect();
+                    println!("[setup] 开机自启: {} 条 enabled 隧道", enabled_ids.len());
+                    for id in enabled_ids {
+                        if let Err(e) = start_by_profile(&app, &id, None).await {
+                            events_log(&app, &id, &format!("开机自启失败: {e}"));
+                        }
+                    }
+                });
+            }
             Ok(())
         })
+        // 关闭按钮 = 收进托盘 (隧道常驻; 退出走托盘菜单)
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                api.prevent_close();
+                let _ = window.hide();
+            }
+        })
         .plugin(tauri_plugin_opener::init())
+        // 自启注册带 --autostart 参数: 开机拉起时据此隐藏窗口 + 后台启动隧道
+        .plugin(tauri_plugin_autostart::init(
+            tauri_plugin_autostart::MacosLauncher::LaunchAgent,
+            Some(vec!["--autostart"]),
+        ))
         .invoke_handler(tauri::generate_handler![
             probe_local_proxy,
             verify_remote_tunnel,
@@ -546,6 +682,7 @@ pub fn run() {
             tunnel_stop,
             tunnel_retry_now,
             tunnel_delete,
+            tunnel_set_enabled,
             presets_list,
             tunnel_from_preset,
             list_profiles,
@@ -555,6 +692,8 @@ pub fn run() {
             profile_defaults_save,
             known_hosts_list,
             known_hosts_forget,
+            autostart_get,
+            autostart_set,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

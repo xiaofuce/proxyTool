@@ -18,8 +18,10 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = [] }
+tauri = { version = "2", features = ["tray-icon"] }
 tauri-plugin-opener = "2"
+# 开机自启 (P6): Windows 写 HKCU Run 键, 无需管理员
+tauri-plugin-autostart = "2.5"
 serde = { version = "1", features = ["derive"] }
 # 隧道引擎 (russh/tokio 等依赖都在 core, GUI 层只做桥接)
 proxy-tool-core = { path = "../core" }
