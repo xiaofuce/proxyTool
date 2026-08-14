@@ -9,7 +9,7 @@ const SERVER: &str = "203.0.113.20";
 const USER: &str = "tester";
 
 fn pass() -> &'static str {
-    proxy_tool_lib::creds::pass()
+    proxy_tool_core::creds::pass()
 }
 
 struct H;

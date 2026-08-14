@@ -22,3 +22,6 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# Rust workspace target (P0: workspace 拆分后构建产物在根目录)
+/target/

@@ -24,7 +24,9 @@ export default defineConfig(async () => ({
       : undefined,
     watch: {
       // 3. tell Vite to ignore watching `src-tauri`
-      ignored: ["**/src-tauri/**"],
+      //    以及根 `target/` (workspace 拆分后 cargo 构建产物在仓库根,
+      //    vite 监听会被 linker 锁定的 dll 触发 EBUSY 崩溃)
+      ignored: ["**/src-tauri/**", "**/target/**"],
     },
   },
 }));

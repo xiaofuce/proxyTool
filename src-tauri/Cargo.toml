@@ -10,7 +10,7 @@ edition = "2021"
 [lib]
 # The `_lib` suffix may seem redundant but it is necessary
 # to make the lib name unique and wouldn't conflict with the bin name.
-# This seems to be only an issue on Windows, see https://github.com/rust-lang/cargo/issues/8519
+# This is only an issue on Windows, see https://github.com/rust-lang/cargo/issues/8519
 name = "proxy_tool_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
@@ -21,12 +21,6 @@ tauri-build = { version = "2", features = [] }
 tauri = { version = "2", features = [] }
 tauri-plugin-opener = "2"
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-russh = { version = "0.62.6", default-features = false, features = ["ring", "flate2", "rsa"] }
-tokio = { version = "1", features = ["net", "io-util", "rt", "rt-multi-thread", "sync", "macros", "time"] }
-ssh-key = "0.7.0-rc.11"
-
-[dev-dependencies]
-ssh-key = "0.7.0-rc.11"
-log = "0.4"
-
+# 隧道引擎 (russh/tokio 等依赖都在 core, GUI 层只做桥接)
+proxy-tool-core = { path = "../core" }
+tokio = { version = "1", features = ["sync", "time"] }

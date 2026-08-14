@@ -17,15 +17,15 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use proxy_tool_lib::socks::start_socks_server;
-use proxy_tool_lib::tunnel::{run_tunnel, run_tunnel_session, Logger, TunnelConfig};
+use proxy_tool_core::socks::start_socks_server;
+use proxy_tool_core::tunnel::{run_tunnel, run_tunnel_session, Logger, TunnelConfig};
 use russh::client;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 const SERVER: &str = "203.0.113.20";
 const USER: &str = "tester";
 fn pass() -> &'static str {
-    proxy_tool_lib::creds::pass()
+    proxy_tool_core::creds::pass()
 }
 
 /// 把 russh 的 log 输出到 stdout
@@ -401,7 +401,7 @@ PYEOF";
 #[tokio::test]
 async fn std_mode_diag() {
     init_logger();
-    use proxy_tool_lib::probe::probe_local_proxy;
+    use proxy_tool_core::probe::probe_local_proxy;
     let found = probe_local_proxy().await;
     let port = found
         .iter()
@@ -460,7 +460,7 @@ async fn server_can_reach_internet_through_tunnel() {
     //    探测不到时才启动内置 SOCKS 兜底。
     //    注意: 内置 SOCKS 直连出口需要系统路由经 VPN (TUN 模式); 本测试服务器用的
     //    v2cloud 是端口模式, 系统路由未接管, 故必须探测到 7892 才能出网。
-    use proxy_tool_lib::probe::probe_local_proxy;
+    use proxy_tool_core::probe::probe_local_proxy;
     let found = probe_local_proxy().await;
     let vpn_port = found.iter().find(|r| r.socks5_confirmed).map(|r| r.port);
     println!("== 探测到的代理端口: {found:?}");

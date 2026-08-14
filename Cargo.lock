@@ -3448,14 +3448,23 @@ dependencies = [
 name = "proxy-tool"
 version = "0.1.0"
 dependencies = [
+ "proxy-tool-core",
+ "serde",
+ "tauri",
+ "tauri-build",
+ "tauri-plugin-opener",
+ "tokio",
+]
+
+[[package]]
+name = "proxy-tool-core"
+version = "0.1.0"
+dependencies = [
  "log",
  "russh",
  "serde",
  "serde_json",
  "ssh-key",
- "tauri",
- "tauri-build",
- "tauri-plugin-opener",
  "tokio",
 ]
 

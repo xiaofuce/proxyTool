@@ -28,8 +28,6 @@ use russh::Channel;
 use tokio::io::{copy_bidirectional, AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
-use crate::AppState;
-
 /// 隧道连接配置
 #[derive(Debug, Clone)]
 pub struct TunnelConfig {
@@ -857,6 +855,20 @@ pub type TunnelSession = (
     Arc<AtomicBool>,
 );
 
+/// 反向隧道会话槽: 调用方 (GUI 的 AppState) 与引擎共享的会话存放处。
+/// GUI 从中取走句柄以断开; 引擎轮询其存在性与 is_closed 判断会话结束。
+/// 引擎经此与 GUI 解耦 —— 不感知 tauri。
+pub type TunnelSlot = Arc<tokio::sync::Mutex<Option<TunnelSession>>>;
+
+/// 向会话发送 SSH DISCONNECT 真正关闭连接。
+/// 仅 drop Arc 不够: 后台任务持有同一 Arc 的 clone, Handle 不会 drop (旧 bug)。
+pub async fn close_session(session: &TunnelSession) {
+    let h = session.0.lock().await;
+    let _ = h
+        .disconnect(russh::Disconnect::ByApplication, "user disconnect", "")
+        .await;
+}
+
 /// 建立隧道会话并返回句柄。调用方负责保持句柄存活 (drop 即断开)。
 /// 自动选择模式: 标准转发通道被服务器端组件污染时切换到兼容模式。
 pub async fn run_tunnel(cfg: TunnelConfig, logger: Logger) -> Result<TunnelSession, String> {
@@ -883,24 +895,22 @@ pub async fn run_tunnel(cfg: TunnelConfig, logger: Logger) -> Result<TunnelSessi
     }
 }
 
-/// GUI 入口: 建立隧道并常驻后台直到断开。
+/// 引擎入口: 建立隧道并常驻后台直到断开。
 /// 标准模式下若运行期检测到转发通道被注入 (探测漏检的兜底), 自动重建为兼容模式。
-/// 日志与状态通过调用方提供的闭包转发到 GUI (与具体事件格式解耦)。
+/// 会话句柄存入调用方提供的 `session_slot` (GUI 经它取句柄断开);
+/// 日志与状态通过调用方提供的闭包转发 (与具体事件格式解耦)。
 pub async fn start_tunnel(
-    app: tauri::AppHandle,
+    session_slot: TunnelSlot,
     cfg: TunnelConfig,
     logger: Logger,
     on_status: Arc<dyn Fn(&str) + Send + Sync>,
 ) -> Result<(), String> {
-    use tauri::Manager;
-    let state = app.state::<AppState>();
-
     let (mut session, corrupted) = run_tunnel(cfg.clone(), logger.clone()).await?;
     let mut rebuilt = corrupted.load(Ordering::Relaxed); // 已在 run_tunnel 内切过兼容模式
 
-    // 存入全局状态以便断开
+    // 存入会话槽以便调用方断开
     {
-        let mut guard = state.remote_session.lock().await;
+        let mut guard = session_slot.lock().await;
         *guard = Some((session.clone(), corrupted.clone()));
     }
     (on_status)("connected");
@@ -908,7 +918,7 @@ pub async fn start_tunnel(
     // 保持会话: 直到 is_closed (连接断开或手动 drop), 或运行期检测到注入后重建
     loop {
         let (closed, polluted) = {
-            let guard = state.remote_session.lock().await;
+            let guard = session_slot.lock().await;
             let closed = match guard.as_ref() {
                 Some((arc, _)) => arc.lock().await.is_closed(),
                 None => true,
@@ -922,15 +932,12 @@ pub async fn start_tunnel(
             rebuilt = true;
             (logger)("标准转发通道运行期检测到注入, 自动重建为兼容模式...");
             // 断开标准模式会话 (drop 即关闭), 重建兼容模式
-            {
-                let mut guard = state.remote_session.lock().await;
-                *guard = None;
-            }
+            *session_slot.lock().await = None;
             drop(session);
             let new_session = run_tunnel_session(cfg.clone(), logger.clone()).await?;
             session = new_session;
             {
-                let mut guard = state.remote_session.lock().await;
+                let mut guard = session_slot.lock().await;
                 *guard = Some((session.clone(), corrupted.clone()));
             }
             (on_status)("connected");
@@ -938,7 +945,7 @@ pub async fn start_tunnel(
         }
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
     }
-    // 不在此 emit "disconnected": 终态由调用方 (lib.rs 重连循环) 统一控制,
+    // 不在此 emit "disconnected": 终态由调用方 (GUI 重连循环) 统一控制,
     // 否则会与重连循环的 disconnected/reconnecting 重复发射。
     Ok(())
 }

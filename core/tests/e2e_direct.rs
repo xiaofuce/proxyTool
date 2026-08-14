@@ -9,15 +9,15 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use proxy_tool_lib::direct::{run_dynamic_forward, run_local_forward, DirectConfig};
-use proxy_tool_lib::ssh::Logger;
+use proxy_tool_core::direct::{run_dynamic_forward, run_local_forward, DirectConfig};
+use proxy_tool_core::ssh::Logger;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
 const SERVER: &str = "203.0.113.20";
 const USER: &str = "tester";
 fn pass() -> &'static str {
-    proxy_tool_lib::creds::pass()
+    proxy_tool_core::creds::pass()
 }
 
 fn silent_logger() -> Logger {
@@ -101,7 +101,7 @@ async fn wrong_password_is_reported_as_auth_rejection() {
     };
     println!("== 错误密码错误信息: {err:?}");
     assert!(
-        proxy_tool_lib::ssh::is_auth_rejected(&err),
+        proxy_tool_core::ssh::is_auth_rejected(&err),
         "应识别为认证被拒 (停止重连), 实际: {err:?}"
     );
 }
