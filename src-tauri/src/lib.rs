@@ -11,6 +11,8 @@
 //!   tunnel_from_scenario`
 //! - 命令生成页落盘 (我的命令 + 最近输入, 加密文件): `cmdgen_list/cmdgen_save/
 //!   cmdgen_delete/cmdgen_set_last`
+//! - 凭据记忆 (密码/口令按档案 id 加密落盘 secrets.enc): `secrets_status/
+//!   secret_forget` (记住走 `tunnel_start` 的 remember 参数)
 //! - 档案: `list_profiles/save_profile/delete_profile` + 分层默认值
 //!   `profile_defaults_get/profile_defaults_save`
 //! - 场景动作: `verify_remote_tunnel/deploy_wrapper` (vpn_share 预设附带)
@@ -27,6 +29,7 @@ use proxy_tool_core::engine::{Registry, SshCreds};
 use proxy_tool_core::model::{TunnelKind, TunnelSpec, TunnelState};
 use proxy_tool_core::cmd_recipes::{self, CmdParams, CmdRecipe, CmdRecipeStore};
 use proxy_tool_core::scenarios::Scenario;
+use proxy_tool_core::secrets::{self, SecretStore};
 use proxy_tool_core::{presets, probe, profiles, ssh, store, TunnelEvents};
 use serde::Serialize;
 use tauri::Manager;
@@ -44,6 +47,8 @@ pub struct AppState {
     pub scenario_store: Mutex<store::ScenarioStore>,
     /// 命令生成页用户数据 (我的命令 + 最近输入; cmd_recipes.enc 加密落盘)
     pub cmd_store: Mutex<CmdRecipeStore>,
+    /// 记住的凭据 (档案 id → 密码/口令; secrets.enc 加密落盘, 跨平台统一)
+    pub secret_store: Mutex<SecretStore>,
 }
 
 /// 隧道状态事件负载: { id, kind, state, message? }
@@ -82,6 +87,35 @@ impl TunnelEvents for TauriEmitter {
                 message: message.map(|m| m.into()),
             },
         );
+        // 凭据失效即作废记住的密码 (与前端会话缓存逐出同语义):
+        // 认证被拒 / 私钥加载失败(口令不对) → 删掉加密落盘的那份,
+        // 下次启动重新询问, 不静默复用坏凭据。事件是同步回调 → spawn 处理。
+        if state == "error" {
+            let msg = message.unwrap_or_default();
+            if msg.contains("认证被拒") || msg.contains("加载私钥") {
+                let app = self.0.clone();
+                let tunnel_id = id.to_string();
+                tauri::async_runtime::spawn(async move {
+                    let state = app.state::<AppState>();
+                    let profile_id = state
+                        .registry
+                        .list()
+                        .into_iter()
+                        .find(|(s, _)| s.id == tunnel_id)
+                        .map(|(s, _)| s.profile_id);
+                    let Some(profile_id) = profile_id else { return };
+                    let mut guard = state.secret_store.lock().await;
+                    if guard.contains(&profile_id) {
+                        guard.remove(&profile_id);
+                        if let Ok(dir) = data_dir(&app) {
+                            if let Err(e) = secrets::save_secret_store(&dir, &guard) {
+                                eprintln!("[secrets] 保存失败: {e}");
+                            }
+                        }
+                    }
+                });
+            }
+        }
     }
     fn log(&self, id: &str, kind: &str, msg: &str) {
         use tauri::Emitter;
@@ -168,7 +202,7 @@ async fn tunnel_create(
 
 /// 档案 + 会话密码 → 认证方式。
 /// 密钥档案: 密码框充当密钥口令 (未加密私钥可留空);
-/// 密码档案: 密码必填 (仅会话内存, 不落盘)。
+/// 密码档案: 密码必填 (本次注入或已记住的加密落盘凭据)。
 fn resolve_auth(
     profile: &profiles::ServerProfile,
     password: Option<String>,
@@ -180,13 +214,23 @@ fn resolve_auth(
             passphrase: nonempty,
         }),
         None => Ok(ssh::AuthMethod::Password(
-            nonempty.ok_or("该服务器使用密码认证, 请输入密码")?,
+            nonempty.ok_or("该服务器使用密码认证, 请输入密码 (或勾选记住密码)")?,
         )),
     }
 }
 
+/// 从凭据记忆取回已记住的密码/口令 (档案 id 键控; 密钥档案记住空口令 = None)
+async fn stored_secret(state: &AppState, profile_id: &str) -> Option<String> {
+    state
+        .secret_store
+        .lock()
+        .await
+        .get(profile_id)
+        .map(|s| s.to_string())
+}
+
 /// 按档案启动隧道 (tunnel_start 命令与开机自启动共用):
-/// 查关联档案 → 解析认证方式 (密码/口令本次注入) → 注入凭据启动。
+/// 查关联档案 → 解析认证方式 (本次注入的密码优先, 缺省用已记住的加密凭据) → 启动。
 async fn start_by_profile(
     app: &tauri::AppHandle,
     id: &str,
@@ -210,6 +254,11 @@ async fn start_by_profile(
             .ok_or_else(|| format!("隧道关联的档案不存在 (id: {})", spec.profile_id))?;
         (profile, store_guard.defaults.clone())
     };
+    // 本次输入优先; 未输入 → 已记住的加密凭据 (密码档案免输, 开机自启全覆盖)
+    let password = match password.filter(|p| !p.is_empty()) {
+        Some(p) => Some(p),
+        None => stored_secret(&state, &spec.profile_id).await,
+    };
     let auth = resolve_auth(&profile, password)?;
     // 共享连接: 档案层覆盖 > 全局默认值 > 引擎默认 (开)
     let (share, max_sessions) = (
@@ -227,13 +276,38 @@ async fn start_by_profile(
     state.registry.start(&id, creds, emitter(app)).await
 }
 
-/// 命令: 启动隧道 (按 spec.profile_id 查档案; 密码/口令本次注入, 不落盘)
+/// 命令: 启动隧道 (按 spec.profile_id 查档案; 密码/口令本次注入,
+/// remember=Some(true) 且认证字段非空 → 记住 (加密落盘); Some(false) → 清除记住)
 #[tauri::command]
 async fn tunnel_start(
     app: tauri::AppHandle,
     id: String,
     password: Option<String>,
+    remember: Option<bool>,
 ) -> Result<(), String> {
+    if let (Some(remember), Some(pw)) = (remember, password.as_deref().filter(|p| !p.is_empty())) {
+        let spec_profile = {
+            let state = app.state::<AppState>();
+            state
+                .registry
+                .list()
+                .into_iter()
+                .find(|(s, _)| s.id == id)
+                .map(|(s, _)| s.profile_id)
+        };
+        if let Some(profile_id) = spec_profile {
+            let state = app.state::<AppState>();
+            let mut guard = state.secret_store.lock().await;
+            if remember {
+                guard.set(&profile_id, pw);
+            } else {
+                guard.remove(&profile_id);
+            }
+            if let Err(e) = secrets::save_secret_store(&data_dir(&app)?, &guard) {
+                eprintln!("[secrets] 保存失败: {e}");
+            }
+        }
+    }
     start_by_profile(&app, &id, password).await
 }
 
@@ -534,6 +608,10 @@ async fn verify_remote_tunnel(
     password: Option<String>,
 ) -> Result<String, String> {
     let (profile, remote_port) = resolve_reverse(&state, &id).await?;
+    let password = match password.filter(|p| !p.is_empty()) {
+        Some(p) => Some(p),
+        None => stored_secret(&state, &profile.id).await,
+    };
     let auth = resolve_auth(&profile, password)?;
     let cmd = format!(
         "echo '--- 直连(不经隧道) ---'; curl -s -o /dev/null -m 8 -w '直连: http_code=%{{http_code}} time=%{{time_total}}s\\n' https://www.google.com || echo '直连失败(预期: 服务器网络无法访问被墙站点)'; echo '--- 经隧道 ---'; curl -s -o /dev/null -m 10 -w '隧道: http_code=%{{http_code}} time=%{{time_total}}s\\n' --socks5-hostname 127.0.0.1:{remote_port} https://www.google.com || echo '隧道访问失败'"
@@ -562,6 +640,10 @@ async fn deploy_wrapper(
     password: Option<String>,
 ) -> Result<String, String> {
     let (profile, remote_port) = resolve_reverse(&state, &id).await?;
+    let password = match password.filter(|p| !p.is_empty()) {
+        Some(p) => Some(p),
+        None => stored_secret(&state, &profile.id).await,
+    };
     let auth = resolve_auth(&profile, password)?;
     let cmd = format!(
         r#"set -e
@@ -678,10 +760,49 @@ async fn delete_profile(
     state: tauri::State<'_, AppState>,
     id: String,
 ) -> Result<Vec<profiles::ServerProfile>, String> {
+    {
+        // 连带清除记住的凭据 (加密落盘那份; 档案没了凭据也不应残留)
+        let mut secrets_guard = state.secret_store.lock().await;
+        if secrets_guard.contains(&id) {
+            secrets_guard.remove(&id);
+            if let Err(e) = secrets::save_secret_store(&data_dir(&app)?, &secrets_guard) {
+                eprintln!("[secrets] 保存失败: {e}");
+            }
+        }
+    }
+    // 连带停止并删除关联隧道 (运行中的先停, 否则引擎任务残留占端口,
+    // 且档案删除后隧道在 UI 中不可见无法再删 → 孤儿)
+    for (spec, _) in state.registry.list() {
+        if spec.profile_id == id {
+            if let Err(e) = state.registry.delete(&spec.id).await {
+                eprintln!("[delete_profile] 停止/删除隧道 {} 失败: {e}", spec.id);
+            }
+        }
+    }
     let mut store_guard = state.profile_store.lock().await;
     store_guard.profiles.retain(|p| p.id != id);
     store::save_profiles(&data_dir(&app)?, &store_guard)?;
     Ok(store_guard.profiles.clone())
+}
+
+// ---------- 凭据记忆 (密码/口令加密落盘, R6) ----------
+
+/// 命令: 已记住凭据的档案 id 列表 (详情页显示状态用; 不回传密码本身)
+#[tauri::command]
+async fn secrets_status(state: tauri::State<'_, AppState>) -> Result<Vec<String>, String> {
+    Ok(state.secret_store.lock().await.secrets.keys().cloned().collect())
+}
+
+/// 命令: 清除某档案记住的凭据 (详情页「清除密码」)
+#[tauri::command]
+async fn secret_forget(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+    profile_id: String,
+) -> Result<(), String> {
+    let mut guard = state.secret_store.lock().await;
+    guard.remove(&profile_id);
+    secrets::save_secret_store(&data_dir(&app)?, &guard)
 }
 
 /// 命令: 读取分层默认值 (档案层, 所有档案共享)
@@ -791,12 +912,14 @@ pub fn run() {
                 profile_store: Mutex::new(profile_store),
                 scenario_store: Mutex::new(store::load_scenarios(&dir)),
                 cmd_store: Mutex::new(cmd_recipes::load_cmd_store(&dir)),
+                secret_store: Mutex::new(secrets::load_secret_store(&dir)),
             });
 
             setup_tray(handle)?;
 
             // 开机自启拉起 (--autostart): 隐藏窗口后台启动 enabled 隧道。
-            // 密码档案 / 加密私钥无法免交互认证 → 各自日志说明后跳过。
+            // 凭据来源 = 已记住的加密落盘密码/口令 (start_by_profile 内兜底);
+            // 没记住的 (首次输密码/加密私钥未记住口令) → 各自日志说明后跳过。
             if std::env::args().any(|a| a == "--autostart") {
                 if let Some(w) = handle.get_webview_window("main") {
                     let _ = w.hide();
@@ -855,6 +978,8 @@ pub fn run() {
             cmdgen_save,
             cmdgen_delete,
             cmdgen_set_last,
+            secrets_status,
+            secret_forget,
             list_profiles,
             save_profile,
             delete_profile,

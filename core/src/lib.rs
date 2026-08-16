@@ -13,14 +13,17 @@
 //! - `socks`: 内置 SOCKS5 服务器 (连接器可插拔: Plain / 经 SSH)
 //! - `presets`: 场景预设 (L3)——预设 id → TunnelSpec 模板 + 附加动作
 //! - `probe`: 本机代理端口探测 (VPN 无关化)
-//! - `profiles`: 服务器档案 (密码永不落盘)
+//! - `profiles`: 服务器档案
 //! - `store`: 档案 + 隧道列表持久化 (JSON, 路径可注入, v1→v2 迁移)
+//! - `crypto`: 落盘加密原语 (AES-256-GCM, cmd_recipes/secrets 共用)
 //! - `cmd_recipes`: 命令生成页用户数据 (我的命令 + 最近输入, AES-GCM 加密落盘)
+//! - `secrets`: 服务器凭据 (密码/私钥口令, 按档案 id 加密落盘 secrets.enc)
 //! - `creds`: 测试/调试凭据 (环境变量或 gitignored 本地文件)
 
 pub mod backend;
 pub mod cmd_recipes;
 pub mod creds;
+pub mod crypto;
 pub mod direct;
 pub mod engine;
 pub mod known_hosts;
@@ -29,6 +32,7 @@ pub mod presets;
 pub mod probe;
 pub mod profiles;
 pub mod scenarios;
+pub mod secrets;
 pub mod socks;
 pub mod ssh;
 pub mod store;

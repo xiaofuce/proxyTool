@@ -1524,6 +1524,12 @@ details p {
   word-break: break-all;
 }
 
+/* 凭据卡 (记住的密码) 的说明行 — 排印同 fp-code 层级 */
+.sec-note {
+  font-size: var(--fs-xs);
+  color: var(--muted);
+}
+
 .fp-actions {
   display: flex;
   gap: 6px;

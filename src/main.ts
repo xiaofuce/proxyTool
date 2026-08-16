@@ -136,8 +136,11 @@ const ACTIVE_STATES = ["connected", "connecting", "reconnecting"];
 let tunnels: TunnelDto[] = [];
 let profiles: Profile[] = [];
 let scenarios: Scenario[] = [];
-/** profileId -> 本次会话凭据 (密码 / 密钥口令; null = 密钥档案无口令。仅内存, 重启即失) */
+/** profileId -> 本次会话凭据 (密码 / 密钥口令; null = 密钥档案无口令。
+ * 会话内存优先; 未命中时后端兜底用已记住的加密落盘凭据) */
 const passwords = new Map<string, string | null>();
+/** 已记住凭据 (加密落盘 secrets.enc) 的档案 id —— 免输启动/开机自启的数据源 */
+let rememberedIds = new Set<string>();
 /** 结构化日志行 (时间戳 + 级别 + 文本; textContent 渲染天然转义) */
 interface LogLine {
   ts: string;
@@ -514,11 +517,17 @@ function renderTunnelRows(container: HTMLElement, list: TunnelDto[]) {
       expand.click();
     });
 
-    /** password: null = 密钥档案无口令 (后端 KeyFile passphrase=None) */
+    /** password: null = 密钥档案无口令 (后端 KeyFile passphrase=None)。
+     * remember: 有密码即记住 (AES-256-GCM 加密落盘, 重启/自启免输) */
     const doStart = async (password: string | null) => {
       try {
-        await invoke("tunnel_start", { id: t.id, password: password || null });
+        await invoke("tunnel_start", {
+          id: t.id,
+          password: password || null,
+          remember: password ? true : null,
+        });
         passwords.set(t.profileId, password);
+        if (password) rememberedIds.add(t.profileId);
         pwDrafts.delete(t.id);
         pwBar.classList.add("hidden");
       } catch (err) {
@@ -526,7 +535,8 @@ function renderTunnelRows(container: HTMLElement, list: TunnelDto[]) {
       }
     };
     btnStart.addEventListener("click", async () => {
-      if (passwords.has(t.profileId)) {
+      // 优先级: 本次会话输入 > 已记住的加密凭据 (后端兜底, 免输) > 弹条询问
+      if (passwords.has(t.profileId) || rememberedIds.has(t.profileId)) {
         await doStart(passwords.get(t.profileId) ?? null);
         return;
       }
@@ -600,12 +610,12 @@ function renderTunnelRows(container: HTMLElement, list: TunnelDto[]) {
       btnStart.click();
     };
     const runAction = async (cmd: "verify_remote_tunnel" | "deploy_wrapper") => {
-      if (!passwords.has(t.profileId)) {
+      if (!passwords.has(t.profileId) && !rememberedIds.has(t.profileId)) {
         appendLog(t.id, "需要凭据: 请先启动隧道 (或重新输入密码/口令)");
         btnStart.click();
         return;
       }
-      const pass = passwords.get(t.profileId) ?? null;
+      const pass = passwords.get(t.profileId) ?? null; // null → 后端兜底用记住的凭据
       // busy 挂在行内 ⋯ 钮上 (菜单即点即关, 反馈落在持久元素)
       await withLoading(moreBtn, async () => {
         try {
@@ -716,17 +726,17 @@ function renderTunnelRows(container: HTMLElement, list: TunnelDto[]) {
         label: "开机自启",
         icon: "power",
         checked: cur.enabled,
-        title: "系统启动时后台拉起此隧道 (需私钥认证档案; 密码/加密私钥无法免交互启动)",
+        title: "系统启动时后台拉起此隧道 (密码/口令已记住或私钥免口令即可免交互)",
         action: async () => {
           try {
             tunnels = await invoke<TunnelDto[]>("tunnel_set_enabled", {
               id: cur.id,
               enabled: !cur.enabled,
             });
-            if (!cur.enabled && prof && !prof.identityFile) {
+            if (!cur.enabled && prof && !rememberedIds.has(prof.id)) {
               appendLog(
                 cur.id,
-                "提示: 该档案为密码认证, 开机自启时无法免交互启动; 建议为服务器配置私钥路径"
+                "提示: 该服务器尚未记住密码, 开机自启时无法免交互启动; 启动一次并记住密码即可覆盖"
               );
             }
             renderHosts();
@@ -757,12 +767,14 @@ function currentTunnel(id: string): TunnelDto | undefined {
 
 /** 双拉隧道 + 档案 (档案列表曾只 init 拉一次导致陈旧); 托盘常驻场景由 window focus 兜底刷新 */
 async function refreshTunnels() {
-  const [ts, ps] = await Promise.all([
+  const [ts, ps, secs] = await Promise.all([
     invoke<TunnelDto[]>("tunnels_list"),
     invoke<Profile[]>("list_profiles"),
+    invoke<string[]>("secrets_status").catch(() => [] as string[]),
   ]);
   tunnels = ts;
   profiles = ps;
+  rememberedIds = new Set(secs);
   renderHosts();
   if (detailView === "detail") renderServerDetail();
 }
@@ -789,10 +801,12 @@ listen("tunnel-status", (e) => {
     t.state = p.state;
     t.message = p.message;
     // 凭据失效即逐出缓存 (tunnel_start 受理即返回, 缓存是乐观的):
-    // 认证被拒 / 私钥加载失败(口令不对) → 清掉, 下次启动重新询问, 不静默复用坏凭据
+    // 认证被拒 / 私钥加载失败(口令不对) → 会话缓存 + 记住的加密凭据一并
+    // 作废 (后端事件桥已删 secrets.enc 里的那份), 下次启动重新询问
     const msg = p.message ?? "";
     if (p.state === "error" && (msg.includes("认证被拒") || msg.includes("加载私钥"))) {
       passwords.delete(t.profileId);
+      rememberedIds.delete(t.profileId);
     }
     noteConnected(t); // 进/出 connected 维护 uptime 起算点
     updateRow(t);
@@ -932,7 +946,7 @@ function renderHosts() {
     toggle.setAttribute("aria-label", anyActive ? "全部停止" : "一键启动");
     toggle.title = anyActive
       ? "停止该服务器的全部隧道"
-      : "一键启动该服务器全部 enabled 隧道 (密码认证首次会要求输入密码)";
+      : "一键启动该服务器全部 enabled 隧道 (首次需输密码, 之后记住免输)";
     toggle.addEventListener("click", (e) => {
       e.stopPropagation();
       selectProfile(p.id);
@@ -962,7 +976,7 @@ function selectProfile(id: string | null) {
   setDetailView(id ? "detail" : "empty");
 }
 
-/** ▶: 启动该服务器全部 enabled 且未在运行的隧道 (密码档案首次弹右面板密码条) */
+/** ▶: 启动该服务器全部 enabled 且未在运行的隧道 (无凭据可用时弹右面板密码条) */
 async function startAllForProfile(p: Profile) {
   const targets = tunnels.filter(
     (t) => t.profileId === p.id && t.enabled && !ACTIVE_STATES.includes(t.state)
@@ -971,17 +985,17 @@ async function startAllForProfile(p: Profile) {
     renderServerDetail();
     return;
   }
-  // 密码档案且本会话未输入过 → 右面板密码条收集一次, 再批量启动
-  if (!p.identityFile && !passwords.has(p.id)) {
+  // 密码档案且既没本次输入也没记住 → 右面板密码条收集一次, 再批量启动
+  if (!p.identityFile && !passwords.has(p.id) && !rememberedIds.has(p.id)) {
     pdPwTargets = targets;
     renderServerDetail(true);
     el<HTMLInputElement>("pd-pw-input")?.focus();
     return;
   }
-  const pass = passwords.get(p.id) ?? null;
+  const pass = passwords.get(p.id) ?? null; // null → 后端兜底用记住的凭据
   for (const t of targets) {
     try {
-      await invoke("tunnel_start", { id: t.id, password: pass });
+      await invoke("tunnel_start", { id: t.id, password: pass, remember: pass ? true : null });
     } catch (err) {
       appendLog(t.id, `❌ ${err}`);
     }
@@ -1396,12 +1410,13 @@ function renderServerDetail(showPwBar = false) {
         return;
       }
       passwords.set(p.id, input.value);
+      rememberedIds.add(p.id);
       pwbar.classList.add("hidden");
       const targets = pdPwTargets;
       pdPwTargets = [];
       for (const t of targets) {
         try {
-          await invoke("tunnel_start", { id: t.id, password: input.value });
+          await invoke("tunnel_start", { id: t.id, password: input.value, remember: true });
         } catch (err) {
           appendLog(t.id, `❌ ${err}`);
         }
@@ -1423,7 +1438,59 @@ function renderServerDetail(showPwBar = false) {
     renderTunnelRows(listEl, mine);
   }
 
+  fillSecretCard(p);
   fillFingerprint(p);
+}
+
+// ---------- 服务器详情尾: 凭据卡片 (记住的密码, 加密落盘) ----------
+
+/** 凭据卡 (排印复用指纹卡 .fp-* 类): 已记住 → 状态 + 清除; 未记住 → 占位说明 */
+function fillSecretCard(p: Profile) {
+  const box = el<HTMLDivElement>("pd-secret");
+  const remembered = rememberedIds.has(p.id);
+  box.innerHTML = "";
+  const row = document.createElement("div");
+  row.className = "fp-row";
+  if (!remembered) {
+    const none = document.createElement("div");
+    none.className = "fp-none";
+    none.textContent = p.identityFile
+      ? "密码: 私钥口令输入一次即记住 (加密保存); 未加密私钥无需输入"
+      : "密码: 首次启动输入后自动记住 (AES-256-GCM 加密保存到本机)";
+    box.append(none);
+    return;
+  }
+  row.innerHTML =
+    `<span class="fp-ic">${icon("key", 16)}</span>` +
+    `<div class="fp-main"><div class="fp-head">已记住${p.identityFile ? "私钥口令" : "密码"}</div>` +
+    `<span class="sec-note">加密保存于本机 (secrets.enc) · 重启与开机自启免输入</span></div>`;
+  const actions = document.createElement("div");
+  actions.className = "fp-actions";
+  const clearBtn = document.createElement("button");
+  clearBtn.type = "button";
+  clearBtn.className = "danger";
+  clearBtn.textContent = "清除";
+  clearBtn.addEventListener("click", async () => {
+    const ok = await dialog({
+      title: `清除 ${p.name} 记住的${p.identityFile ? "私钥口令" : "密码"}?`,
+      body: "下次启动会重新询问; 服务器上的任何配置不受影响。",
+      confirmText: "清除",
+      danger: true,
+    });
+    if (!ok) return;
+    try {
+      await invoke("secret_forget", { profileId: p.id });
+      rememberedIds.delete(p.id);
+      passwords.delete(p.id);
+      toast("已清除记住的密码", "success");
+      fillSecretCard(p);
+    } catch (err) {
+      toast(`清除失败: ${err}`, "error");
+    }
+  });
+  actions.append(clearBtn);
+  row.append(actions);
+  box.append(row);
 }
 
 // ---------- 服务器详情尾: 指纹卡片 (TOFU 记忆) ----------
@@ -1822,8 +1889,8 @@ function openTunnelForm(ctx: { title: string; hint: string; defaultName: string 
 /** 密码栏文案随选中服务器认证方式 (密钥档案: 口令可空) */
 function syncWzPasswordLabel() {
   el("wz-password-label").textContent = selectedProfile()?.identityFile
-    ? "密钥口令 (私钥未加密可留空, 仅本次会话)"
-    : "密码 (仅本次会话内存, 不保存)";
+    ? "密钥口令 (私钥未加密可留空)"
+    : "密码 (连接成功后加密保存到本机)";
 }
 
 /** 形态切换: 重置为该形态的默认参数 (切换即弃当前未保存的参数) */
@@ -1915,9 +1982,9 @@ async function submitTunnelForm(start: boolean, btn?: HTMLButtonElement | null) 
   const profileId = selectedProfileId;
   const cached = passwords.get(profileId);
   const password = el<HTMLInputElement>("wz-password").value;
-  // 密钥档案口令可空 (passphrase: None); 密码档案须本次输入或会话已缓存
-  if (start && !password && !selectedProfile()?.identityFile && cached === undefined) {
-    errEl.textContent = "启动需要密码 (仅本次会话内存)";
+  // 密钥档案口令可空 (passphrase: None); 密码档案须本次输入/会话缓存/已记住其一
+  if (start && !password && !selectedProfile()?.identityFile && cached === undefined && !rememberedIds.has(profileId)) {
+    errEl.textContent = "启动需要密码";
     return;
   }
   const spec: TunnelSpec = { ...wzSpec, name, profileId };
@@ -1956,10 +2023,13 @@ async function submitTunnelForm(start: boolean, btn?: HTMLButtonElement | null) 
         }
       }
       if (start) {
-        const pass = password || cached || null;
-        if (password) passwords.set(profileId, password);
+        const pass = password || cached || null; // null → 后端兜底用记住的凭据
+        if (password) {
+          passwords.set(profileId, password);
+          rememberedIds.add(profileId);
+        }
         try {
-          await invoke("tunnel_start", { id: spec.id, password: pass });
+          await invoke("tunnel_start", { id: spec.id, password: pass, remember: pass ? true : null });
         } catch (err) {
           appendLog(spec.id, `❌ ${err}`);
         }
@@ -2075,11 +2145,11 @@ initAppearance();
 initCmdGen();
 initHelp();
 (async () => {
-  profiles = await invoke<Profile[]>("list_profiles");
-  tunnels = await invoke<TunnelDto[]>("tunnels_list");
+  // 三拉: 隧道 + 档案 + 已记住凭据 (rememberedIds —— 凭据卡/免输启动/自启判定,
+  // 漏拉则新会话 (重启/reload) 恒空, 记住了密码 UI 仍会询问)
+  await refreshTunnels();
   await loadDefaults();
   await loadAutostart();
-  renderHosts();
   // 首次使用软引导: 一台服务器都没有 → 落在帮助页
   showPage(profiles.length === 0 ? "help" : "servers");
 })().catch((e) => console.error("初始化失败", e));
