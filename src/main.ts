@@ -10,6 +10,8 @@ interface Profile {
   username: string;
   /** 私钥路径 (选填): 设置后走密钥认证, 密码框改充当密钥口令 */
   identityFile?: string | null;
+  /** 共享 SSH 连接 (null = 跟随全局默认; 服务器级覆盖) */
+  shareConnection?: boolean | null;
 }
 
 // serde externally-tagged enum: { reverse: {...} } | { local: {...} } | { dynamic: {...} }
@@ -63,6 +65,10 @@ interface Scenario {
 interface Defaults {
   connectTimeoutSecs?: number | null;
   reconnect?: Policy | null;
+  /** 共享连接全局默认 (null = 引擎默认开) */
+  shareConnection?: boolean | null;
+  /** MaxSessions 预算 (null = sshd 默认 10) */
+  maxSessions?: number | null;
 }
 
 const DEFAULT_POLICY: Policy = {
@@ -873,6 +879,8 @@ function openServerForm(p: Profile | null) {
   el<HTMLInputElement>("profile-port").value = String(p?.port ?? 22);
   el<HTMLInputElement>("profile-user").value = p?.username ?? "";
   el<HTMLInputElement>("profile-key").value = p?.identityFile ?? "";
+  el<HTMLSelectElement>("profile-share").value =
+    p?.shareConnection == null ? "" : p.shareConnection ? "on" : "off";
   setDetailView("server-form");
   el<HTMLInputElement>("profile-name").focus();
 }
@@ -884,6 +892,8 @@ el<HTMLFormElement>("server-form").addEventListener("submit", async (e) => {
   const port = Number(el<HTMLInputElement>("profile-port").value);
   const username = el<HTMLInputElement>("profile-user").value.trim();
   const keyPath = el<HTMLInputElement>("profile-key").value.trim();
+  const shareSel = el<HTMLSelectElement>("profile-share").value;
+  const shareConnection = shareSel === "" ? null : shareSel === "on";
   if (!name || !host || !username) {
     alert("请填写名称、地址和用户名");
     return;
@@ -891,7 +901,7 @@ el<HTMLFormElement>("server-form").addEventListener("submit", async (e) => {
   try {
     const id = el<HTMLInputElement>("profile-id").value || crypto.randomUUID();
     profiles = await invoke<Profile[]>("save_profile", {
-      profile: { id, name, host, port, username, identityFile: keyPath || null },
+      profile: { id, name, host, port, username, identityFile: keyPath || null, shareConnection },
     });
     selectProfile(id); // 保存后选中并进入详情
     renderCurrentPage(); // 已有隧道摘要里的档案名同步
@@ -1326,6 +1336,8 @@ async function loadDefaults() {
     el<HTMLInputElement>("def-auto").checked = p.auto;
     el<HTMLInputElement>("def-fast").value = String(p.fastRetries);
     el<HTMLInputElement>("def-max").value = String(p.maxBackoff);
+    el<HTMLInputElement>("def-share").checked = d.shareConnection ?? true;
+    el<HTMLInputElement>("def-maxsessions").value = String(d.maxSessions ?? 10);
   } catch (err) {
     console.error("读取默认值失败", err);
   }
@@ -1343,8 +1355,14 @@ el<HTMLButtonElement>("def-save").addEventListener("click", async () => {
       fastRetries: Number(el<HTMLInputElement>("def-fast").value),
       maxBackoff: Number(el<HTMLInputElement>("def-max").value),
     };
+    const maxSessions = Number(el<HTMLInputElement>("def-maxsessions").value);
     await invoke("profile_defaults_save", {
-      defaults: { connectTimeoutSecs: d.connectTimeoutSecs ?? null, reconnect: policy },
+      defaults: {
+        connectTimeoutSecs: d.connectTimeoutSecs ?? null,
+        reconnect: policy,
+        shareConnection: el<HTMLInputElement>("def-share").checked,
+        maxSessions: Number.isFinite(maxSessions) && maxSessions > 0 ? maxSessions : null,
+      },
     });
     btn.textContent = "已保存 ✓";
     setTimeout(() => (btn.textContent = "保存默认值"), 1500);

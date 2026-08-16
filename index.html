@@ -72,7 +72,7 @@
             </header>
 
             <div class="card">
-              <h3>重连默认值 <span class="card-sub">新建隧道时继承</span></h3>
+              <h3>新隧道默认值 <span class="card-sub">重连策略在新建隧道时继承</span></h3>
               <div class="form-grid">
                 <label class="check-label">
                   <input type="checkbox" id="def-auto" checked />
@@ -87,6 +87,18 @@
                   <span>退避封顶 (秒)</span>
                   <input id="def-max" type="number" value="30" min="1" max="600" />
                 </label>
+                <label class="check-label">
+                  <input type="checkbox" id="def-share" checked />
+                  <span>共享 SSH 连接 (同服务器隧道复用一条连接)</span>
+                </label>
+                <label>
+                  <span>MaxSessions 预算</span>
+                  <input id="def-maxsessions" type="number" value="10" min="2" max="128" />
+                </label>
+              </div>
+              <div class="hint" style="min-height: 0; margin: 4px 0">
+                共享连接与 MaxSessions 对全部隧道在<b>启动时</b>生效（服务器表单可按服务器覆盖共享开关）；
+                服务器 sshd 的 MaxSessions（默认 10）计入转发通道，预算将满时新隧道自动改用独立连接并在日志告警。
               </div>
               <div class="actions">
                 <button type="button" id="def-save">保存默认值</button>
@@ -162,6 +174,14 @@
               <div class="hint" style="min-height: 0; margin: 4px 0">
                 填写私钥路径则用密钥认证 (公钥需已加入服务器 authorized_keys)，密码框此时充当密钥口令；留空用密码认证。
               </div>
+              <label>
+                <span>共享 SSH 连接</span>
+                <select id="profile-share">
+                  <option value="">跟随默认值</option>
+                  <option value="on">共享 — 同服务器隧道复用一条连接</option>
+                  <option value="off">独立 — 每条隧道单独连接</option>
+                </select>
+              </label>
               <div class="actions">
                 <button type="submit" class="primary">保存</button>
                 <button type="button" id="sf-cancel">取消</button>
