@@ -2,6 +2,6 @@
 # 复制本文件为 .test-creds.local 并填入真实值
 # (.test-creds.local 已被 .gitignore 忽略, 不会入库)。
 # 也可改用环境变量 PROXYTOOL_TEST_SERVER / PROXYTOOL_TEST_USER / PROXYTOOL_TEST_PASS。
-SERVER=203.0.113.20
-USER=tester
+SERVER=your-test-server-ip
+USER=your-username
 PASS=your-ssh-password

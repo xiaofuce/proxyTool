@@ -5,8 +5,9 @@ use russh::client;
 use std::sync::Arc;
 use tokio::io::AsyncReadExt;
 
-const SERVER: &str = "203.0.113.20";
-const USER: &str = "tester";
+fn server() -> &'static str { &proxy_tool_core::creds::load().server }
+fn port() -> u16 { proxy_tool_core::creds::load().port }
+fn user() -> &'static str { &proxy_tool_core::creds::load().user }
 
 fn pass() -> &'static str {
     proxy_tool_core::creds::pass()
@@ -23,12 +24,12 @@ impl client::Handler for H {
 #[tokio::main]
 async fn main() {
     let config = Arc::new(client::Config::default());
-    let mut session = client::connect(config, &format!("{SERVER}:22"), H)
+    let mut session = client::connect(config, &format!("{}:{}", server(), port()), H)
         .await
         .expect("连接服务器失败");
     assert!(
         session
-            .authenticate_password(USER, pass())
+            .authenticate_password(user(), pass())
             .await
             .unwrap()
             .success(),
