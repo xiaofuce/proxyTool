@@ -19,6 +19,10 @@ NOPUSH="${2:-}"
 SRC=main
 DST=public
 
+if ! git diff-index --quiet HEAD --; then
+    echo "工作区有未提交改动, 请先 commit 再同步 (filter-branch 要求干净工作区)"; exit 1
+fi
+
 if [ "$NOPUSH" != "--no-push" ]; then
     git rev-parse --verify "$REMOTE" >/dev/null 2>&1 \
         || { echo "缺少远程 '$REMOTE': 先 git remote add $REMOTE <url>"; exit 1; }
@@ -35,14 +39,14 @@ git for-each-ref --format='%(refname)' refs/original/ \
 echo "==> 校验: $DST 全历史不含排除路径"
 BAD=$(git rev-list "$DST" | while read -r c; do
     git -c core.quotepath=false ls-tree -r --name-only "$c"
-done | sort -u | grep -E '^(CLAUDE\.md|docs/|最新构思\.md)$' || true)
+done | sort -u | grep -E '^(CLAUDE\.md|docs/.+|最新构思\.md)$' || true)
 [ -z "$BAD" ] || { echo "校验失败, 仍存在: $BAD"; exit 1; }
 
 echo "==> 校验: $DST 树 = $SRC 树减排除路径"
 DIFF=$(comm -3 \
     <(git -c core.quotepath=false ls-tree -r --name-only "$SRC" | sort) \
     <(git -c core.quotepath=false ls-tree -r --name-only "$DST" | sort))
-EXPECTED=$(git -c core.quotepath=false ls-tree -r --name-only "$SRC" | grep -E '^(CLAUDE\.md|docs/|最新构思\.md)$' | sort || true)
+EXPECTED=$(git -c core.quotepath=false ls-tree -r --name-only "$SRC" | grep -E '^(CLAUDE\.md|docs/.+|最新构思\.md)$' | sort || true)
 [ "$DIFF" = "$EXPECTED" ] || { echo "树差异异常: $DIFF"; exit 1; }
 
 if [ "$NOPUSH" = "--no-push" ]; then
