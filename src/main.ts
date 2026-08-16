@@ -129,8 +129,14 @@ let profiles: Profile[] = [];
 let scenarios: Scenario[] = [];
 /** profileId -> 本次会话凭据 (密码 / 密钥口令; null = 密钥档案无口令。仅内存, 重启即失) */
 const passwords = new Map<string, string | null>();
-/** tunnelId -> 日志文本 (行内展开时渲染; 上限防膨胀) */
-const logs = new Map<string, string>();
+/** 结构化日志行 (时间戳 + 级别 + 文本; textContent 渲染天然转义) */
+interface LogLine {
+  ts: string;
+  level: "info" | "warn" | "error";
+  msg: string;
+}
+/** tunnelId -> 日志行 (行内展开时渲染; 上限防膨胀) */
+const logs = new Map<string, LogLine[]>();
 /** tunnelId -> 展开状态 (重渲染保持) */
 const expanded = new Set<string>();
 /** tunnelId -> 连接建立时刻 (uptime 计时; 进/出 connected 维护, 初始加载从加载时刻起算) */
@@ -145,7 +151,7 @@ interface RowRefs {
   msg: HTMLSpanElement;
   msgIcon: HTMLSpanElement;
   msgRow: HTMLDivElement;
-  pre: HTMLPreElement;
+  log: HTMLDivElement;
   pwBar: HTMLDivElement;
   pwInput: HTMLInputElement;
   btnStart: HTMLButtonElement;
@@ -164,18 +170,48 @@ let pdPwTargets: TunnelDto[] = [];
 /** 隧道表单上下文 (来自预设/我的场景/自定义的模板) */
 let wzSpec: TunnelSpec | null = null;
 
-const LOG_CAP = 60_000; // 字符上限, 超出丢弃头部
+const LOG_CAP = 500; // 行数上限, 超出丢弃头部
+
+/** 级别推断: ❌/失败/错误 → error; 警告/WARN/回退 → warn */
+function logLevel(msg: string): LogLine["level"] {
+  if (msg.startsWith("❌") || msg.includes("失败") || msg.includes("错误")) return "error";
+  if (msg.includes("警告") || /WARN/i.test(msg) || msg.includes("回退")) return "warn";
+  return "info";
+}
+
+/** 日志全文 (复制用; 与行渲染同口径) */
+function logText(id: string): string {
+  return (logs.get(id) ?? []).map((l) => `[${l.ts}] ${l.msg}`).join("\n");
+}
+
+function makeLogLine(l: LogLine): HTMLDivElement {
+  const row = document.createElement("div");
+  row.className = `log-line ${l.level}`;
+  const ts = document.createElement("span");
+  ts.className = "log-ts";
+  ts.textContent = l.ts;
+  const msg = document.createElement("span");
+  msg.className = "log-msg";
+  msg.textContent = l.msg;
+  row.append(ts, msg);
+  return row;
+}
+
+/** 智能滚动: 仅当用户接近底部 (<24px) 时跟随新行, 上翻浏览不强拉 */
+function appendLogLine(logEl: HTMLElement, line: LogLine) {
+  const follow = logEl.scrollTop + logEl.clientHeight >= logEl.scrollHeight - 24;
+  logEl.append(makeLogLine(line));
+  while (logEl.childElementCount > LOG_CAP) logEl.firstElementChild?.remove();
+  if (follow) logEl.scrollTop = logEl.scrollHeight;
+}
 
 function appendLog(id: string, msg: string) {
-  const ts = new Date().toLocaleTimeString();
-  let text = (logs.get(id) ?? "") + `[${ts}] ${msg}\n`;
-  if (text.length > LOG_CAP) text = text.slice(-LOG_CAP);
-  logs.set(id, text);
+  const arr = logs.get(id) ?? [];
+  arr.push({ ts: new Date().toLocaleTimeString(), level: logLevel(msg), msg });
+  if (arr.length > LOG_CAP) arr.splice(0, arr.length - LOG_CAP);
+  logs.set(id, arr);
   const refs = rowRefs.get(id);
-  if (refs) {
-    refs.pre.textContent = text;
-    refs.pre.scrollTop = refs.pre.scrollHeight;
-  }
+  if (refs) appendLogLine(refs.log, arr[arr.length - 1]);
 }
 
 function selectedProfile(): Profile | undefined {
@@ -404,9 +440,12 @@ function renderTunnelRows(container: HTMLElement, list: TunnelDto[], overview = 
     msgRow.append(msgIcon, msg);
     card.append(msgRow);
 
-    // --- 详情: 密码条 + 日志 ---
+    // --- 详情: 密码条 + 日志工具条 + 日志 (grid 0fr→1fr 展开动画, 见 .tunnel-detail) ---
     const detail = document.createElement("div");
-    detail.className = "tunnel-detail hidden";
+    detail.className = "tunnel-detail collapsed";
+
+    const detailIn = document.createElement("div");
+    detailIn.className = "tunnel-detail-in";
 
     const pwBar = document.createElement("div");
     pwBar.className = "pw-bar hidden";
@@ -423,10 +462,27 @@ function renderTunnelRows(container: HTMLElement, list: TunnelDto[], overview = 
     pwBtn.textContent = "连接";
     pwBar.append(pwInput, pwBtn);
 
-    const pre = document.createElement("pre");
-    pre.className = "log";
-    pre.textContent = logs.get(t.id) ?? "";
-    detail.append(pwBar, pre);
+    // 日志工具条: 复制 / 清空
+    const logBar = document.createElement("div");
+    logBar.className = "log-bar";
+    const logCopy = document.createElement("button");
+    logCopy.type = "button";
+    logCopy.className = "log-copy";
+    logCopy.title = "复制日志";
+    logCopy.innerHTML = `${icon("copy", 13)}<span class="btn-label">复制</span>`;
+    const logClear = document.createElement("button");
+    logClear.type = "button";
+    logClear.className = "log-clear";
+    logClear.title = "清空日志";
+    logClear.innerHTML = `${icon("eraser", 13)}<span class="btn-label">清空</span>`;
+    logBar.append(logCopy, logClear);
+
+    const logEl = document.createElement("div");
+    logEl.className = "log";
+    for (const line of logs.get(t.id) ?? []) logEl.append(makeLogLine(line));
+    logEl.scrollTop = logEl.scrollHeight; // 初始渲染贴底 (最新在下)
+    detailIn.append(pwBar, logBar, logEl);
+    detail.append(detailIn);
     card.append(detail);
     container.append(card);
 
@@ -437,7 +493,7 @@ function renderTunnelRows(container: HTMLElement, list: TunnelDto[], overview = 
       msg,
       msgIcon,
       msgRow,
-      pre,
+      log: logEl,
       pwBar,
       pwInput,
       btnStart,
@@ -445,8 +501,10 @@ function renderTunnelRows(container: HTMLElement, list: TunnelDto[], overview = 
       moreBtn,
     };
     rowRefs.set(t.id, refs);
-    detail.classList.toggle("hidden", !expanded.has(t.id));
-    expand.classList.toggle("open", expanded.has(t.id));
+    const open0 = expanded.has(t.id);
+    detail.classList.toggle("collapsed", !open0);
+    detail.toggleAttribute("inert", !open0); // 收起时移出 Tab 序, 免焦点钻进不可见区
+    expand.classList.toggle("open", open0);
     updateRow(t);
 
     // 密码草稿保护: 正在输入的密码经整表重绘回填并恢复焦点
@@ -462,9 +520,10 @@ function renderTunnelRows(container: HTMLElement, list: TunnelDto[], overview = 
       const open = expanded.has(t.id);
       if (open) expanded.delete(t.id);
       else expanded.add(t.id);
-      detail.classList.toggle("hidden", open);
+      detail.classList.toggle("collapsed", open);
+      detail.toggleAttribute("inert", open);
       expand.classList.toggle("open", !open);
-      if (!open) pre.scrollTop = pre.scrollHeight;
+      if (!open) logEl.scrollTop = logEl.scrollHeight;
     });
     head.addEventListener("click", (e) => {
       if ((e.target as HTMLElement).closest("button")) return;
@@ -488,7 +547,8 @@ function renderTunnelRows(container: HTMLElement, list: TunnelDto[], overview = 
         return;
       }
       expanded.add(t.id);
-      detail.classList.remove("hidden");
+      detail.classList.remove("collapsed");
+      detail.removeAttribute("inert");
       expand.classList.add("open");
       pwBar.classList.remove("hidden");
       pwInput.focus();
@@ -504,6 +564,23 @@ function renderTunnelRows(container: HTMLElement, list: TunnelDto[], overview = 
     pwInput.addEventListener("input", () => pwDrafts.set(t.id, pwInput.value));
     pwInput.addEventListener("keydown", (e) => {
       if (e.key === "Enter") pwBtn.click();
+    });
+    logCopy.addEventListener("click", async () => {
+      const text = logText(t.id);
+      if (!text) {
+        toast("日志为空", "info");
+        return;
+      }
+      try {
+        await navigator.clipboard.writeText(text);
+        toast("日志已复制", "success");
+      } catch {
+        toast("复制失败", "error");
+      }
+    });
+    logClear.addEventListener("click", () => {
+      logs.delete(t.id);
+      logEl.innerHTML = "";
     });
     btnStop.addEventListener("click", async () => {
       try {
@@ -1700,6 +1777,15 @@ function applyStaticIcons() {
   }
   el<HTMLButtonElement>("pd-new-tunnel").innerHTML =
     `${icon("plus", 15)}<span class="btn-label">新建隧道</span>`;
+  // 空态配线性图标
+  document.querySelector("#detail-empty .dp-empty")?.insertAdjacentHTML(
+    "afterbegin",
+    `<div class="empty-ic">${icon("server", 28)}</div>`,
+  );
+  el("tunnel-empty").insertAdjacentHTML(
+    "afterbegin",
+    `<div class="empty-ic">${icon("waypoints", 28)}</div>`,
+  );
 }
 
 applyStaticIcons();

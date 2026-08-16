@@ -480,53 +480,65 @@ button.danger:hover:not(:disabled) {
   min-height: 0;
 }
 
-/* ---------- 日志 ---------- */
+/* ---------- 日志 (结构化行: 时间戳 mono + 级别着色) ---------- */
 .log {
   background: var(--inset);
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
-  padding: 10px 12px;
+  padding: 8px 12px;
   font-family: "Cascadia Mono", Consolas, monospace;
   font-size: var(--fs-sm);
   line-height: 1.6;
   max-height: 220px;
   overflow-y: auto;
   margin: 0;
+}
+
+.log-line {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+}
+
+.log-ts {
+  flex: none;
+  color: var(--muted);
+}
+
+.log-msg {
+  min-width: 0;
   white-space: pre-wrap;
   word-break: break-all;
 }
 
-/* ---------- 服务器档案列表 ---------- */
-.profile-row {
+.log-line.warn .log-msg {
+  color: var(--warning);
+}
+
+.log-line.error .log-msg {
+  color: var(--danger);
+}
+
+/* 日志工具条 (复制/清空): 贴日志右上角的小号钮 */
+.log-bar {
   display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 10px 4px;
-  border-bottom: 1px solid var(--border);
+  justify-content: flex-end;
+  gap: 6px;
+  margin-bottom: 6px;
 }
 
-.profile-row:last-child {
-  border-bottom: none;
+.log-bar button {
+  padding: 3px 10px;
+  font-size: var(--fs-xs);
 }
 
-.profile-info {
-  flex: 1;
+/* 空态图标 (详情空态 / 隧道空态) */
+.empty-ic {
   display: flex;
-  flex-direction: column;
-  gap: 2px;
-  min-width: 0;
-}
-
-.profile-info strong {
-  font-size: var(--fs-base);
-}
-
-.profile-info span {
-  font-size: var(--fs-sm);
+  justify-content: center;
   color: var(--muted);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  opacity: 0.7;
+  margin-bottom: 10px;
 }
 
 /* ===================== 隧道列表 ===================== */
@@ -668,8 +680,22 @@ button.danger:hover:not(:disabled) {
   color: var(--danger);
 }
 
+/* 展开动画: grid 0fr→1fr (内容层 overflow hidden 才能塌缩) */
 .tunnel-detail {
   margin-top: 10px;
+  display: grid;
+  grid-template-rows: 1fr;
+  transition: grid-template-rows 0.2s ease, margin-top 0.2s ease;
+}
+
+.tunnel-detail.collapsed {
+  grid-template-rows: 0fr;
+  margin-top: 0;
+}
+
+.tunnel-detail-in {
+  overflow: hidden;
+  min-height: 0;
 }
 
 .tunnel-expand {
@@ -1422,6 +1448,11 @@ button.danger-primary:hover:not(:disabled) {
 }
 
 /* 空态卡片内的动作行 */
+#tunnel-empty {
+  text-align: center;
+}
+
 #tunnel-empty .actions {
   margin-top: 10px;
+  justify-content: center;
 }
