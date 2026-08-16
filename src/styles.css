@@ -263,13 +263,6 @@ body {
   50% { opacity: 0.25; }
 }
 
-.sidebar-foot {
-  padding: 10px 12px 4px;
-  font-size: var(--fs-xs);
-  color: var(--muted);
-  border-top: 1px solid var(--border);
-}
-
 /* 字号三档 (设置页): 整体换档 --fs-* tokens, 全 UI 即时缩放; md = 默认 */
 :root[data-font="sm"] {
   --fs-xs: 10px;

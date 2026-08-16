@@ -44,7 +44,6 @@
             <span class="nav-icon"></span><span class="nav-label">帮助</span>
           </button>
         </nav>
-        <div class="sidebar-foot">密码仅存内存 · 不落盘</div>
       </aside>
 
       <div class="main">
@@ -247,7 +246,7 @@
             <div class="card">
               <h3>proxyTool 是什么</h3>
               <p class="lead">
-                在你的<b>电脑</b>和<b>远程服务器</b>之间一键建立 SSH 隧道 —— 免命令行、断线自动重连、密码不落盘。
+                在你的<b>电脑</b>和<b>远程服务器</b>之间一键建立 SSH 隧道 —— 免命令行、断线自动重连、密码加密保存。
               </p>
               <div class="steps">
                 <div class="step"><span class="step-n">1</span><div><strong>新建服务器</strong><span>填地址和账号，像 SSH 客户端一样</span></div></div>
@@ -306,7 +305,7 @@
               <h3>常见问题</h3>
               <details>
                 <summary>密码会被保存吗？</summary>
-                <p>只在本次会话的内存里缓存，<b>永不写入磁盘</b>；认证被拒立即清除，重开软件需重输。</p>
+                <p>会。首次启动输入后自动记住：以 <b>AES-256-GCM 密文</b>保存在本机（secrets.enc），重启与开机自启都不用再输；密码错误会自动作废，服务器详情页也能随时清除。</p>
               </details>
               <details>
                 <summary>首次连接弹出的「指纹」是什么？</summary>
