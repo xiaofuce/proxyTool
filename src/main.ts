@@ -2,7 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { icon, type IconName } from "./icons";
 import { initTheme } from "./theme";
-import { toast, dialog, withLoading } from "./ui";
+import { toast, dialog, withLoading, openMenu, closeMenus, menuTag, type MenuItem } from "./ui";
 
 // ---------- 类型 (与 core serde camelCase 对应) ----------
 interface Profile {
@@ -112,12 +112,13 @@ function formKindOf(k: Kind): FormKind {
   return kindTag(k) as FormKind;
 }
 
+/** 五态五语义: 未启动(中性)/连接中(蓝)/已连接(绿)/重连中(琥珀)/连接失败(红) */
 const STATUS_TEXT: Record<string, string> = {
-  connecting: "连接中...",
+  connecting: "连接中",
   connected: "已连接",
-  reconnecting: "重连中...",
-  disconnected: "未连接",
-  error: "错误",
+  reconnecting: "重连中",
+  disconnected: "未启动",
+  error: "连接失败",
 };
 
 const ACTIVE_STATES = ["connected", "connecting", "reconnecting"];
@@ -132,20 +133,24 @@ const passwords = new Map<string, string | null>();
 const logs = new Map<string, string>();
 /** tunnelId -> 展开状态 (重渲染保持) */
 const expanded = new Set<string>();
+/** tunnelId -> 连接建立时刻 (uptime 计时; 进/出 connected 维护, 初始加载从加载时刻起算) */
+const connectedSince = new Map<string, number>();
+/** tunnelId -> 行内密码输入草稿 (整表重绘回填, 防正在输入的密码丢失) */
+const pwDrafts = new Map<string, string>();
 /** tunnelId -> 行内 DOM 引用 (事件增量更新, 不整表重绘) */
 interface RowRefs {
-  badge: HTMLSpanElement;
+  status: HTMLSpanElement;
+  portChip: HTMLSpanElement;
+  uptime: HTMLSpanElement;
   msg: HTMLSpanElement;
+  msgIcon: HTMLSpanElement;
   msgRow: HTMLDivElement;
   pre: HTMLPreElement;
   pwBar: HTMLDivElement;
   pwInput: HTMLInputElement;
   btnStart: HTMLButtonElement;
   btnStop: HTMLButtonElement;
-  btnRetry: HTMLButtonElement;
-  btnTrust: HTMLButtonElement;
-  btnVerify: HTMLButtonElement;
-  btnDeploy: HTMLButtonElement;
+  moreBtn: HTMLButtonElement;
 }
 const rowRefs = new Map<string, RowRefs>();
 
@@ -226,6 +231,52 @@ function needPassword(t: TunnelDto): boolean {
   return !passwords.has(t.profileId);
 }
 
+/** 运行时长: <60 秒 / N分N秒 / N时N分 / N天N时 */
+function fmtUptime(ms: number): string {
+  const s = Math.floor(ms / 1000);
+  if (s < 60) return `${s}秒`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}分${s % 60}秒`;
+  const h = Math.floor(m / 60);
+  if (h < 24) return `${h}时${m % 60}分`;
+  return `${Math.floor(h / 24)}天${h % 24}时`;
+}
+
+/** 端口 chip: 反向 = 服务器端口 (0=动态分配弱 chip, 回填后 :port 绿点);
+ * 本地/动态 = 本机监听 bind:port。updateRow 与重绘共用 */
+function refreshPortChip(chip: HTMLSpanElement, t: TunnelDto): void {
+  const k = t.kind;
+  if ("reverse" in k) {
+    if (k.reverse.port > 0) {
+      chip.className = "port-chip bound";
+      chip.textContent = `:${k.reverse.port}`;
+      chip.title = "服务器监听端口 (127.0.0.1)";
+    } else {
+      chip.className = "port-chip dyn";
+      chip.textContent = "动态分配";
+      chip.title = "服务器端口 0 = 连接后由服务器分配, 回填显示";
+    }
+  } else if ("local" in k) {
+    chip.className = "port-chip";
+    chip.textContent = `${k.local.bind}:${k.local.port}`;
+    chip.title = "本机监听端口";
+  } else {
+    chip.className = "port-chip";
+    chip.textContent = `${k.dynamic.bind}:${k.dynamic.port}`;
+    chip.title = "本机 SOCKS5 监听端口";
+  }
+}
+
+/** connectedSince 维护: 进 connected 记时刻 (已记不重置), 离 connected 清除。
+ * 状态事件与整表重绘两条路径都过这里, 保证口径一致 */
+function noteConnected(t: TunnelDto): void {
+  if (t.state === "connected") {
+    if (!connectedSince.has(t.id)) connectedSince.set(t.id, Date.now());
+  } else {
+    connectedSince.delete(t.id);
+  }
+}
+
 function refreshNavDot() {
   const dot = el<HTMLSpanElement>("dot-tunnels");
   const states = tunnels.map((t) => t.state);
@@ -236,30 +287,31 @@ function refreshNavDot() {
   else dot.className = "nav-dot";
 }
 
-/** 按当前状态更新一行的徽章与按钮 (增量, 不重建 DOM; 行不在当前容器则跳过) */
+/** 按当前状态更新一行 (增量, 不重建 DOM; 行不在当前容器则跳过)。
+ * 其余动作钮 (重试/信任/验证/部署/场景/删除) 走 ⋯ 菜单, 打开时惰性求值 */
 function updateRow(t: TunnelDto) {
   const refs = rowRefs.get(t.id);
   if (!refs) return;
-  refs.badge.className = `badge ${t.state}`;
-  refs.badge.textContent = STATUS_TEXT[t.state] ?? t.state;
+  refs.status.className = `status-badge ${t.state}`;
+  refs.status.textContent = STATUS_TEXT[t.state] ?? t.state;
+  const isErr = t.state === "error";
   refs.msg.textContent = t.message ?? "";
   refs.msgRow.classList.toggle("hidden", !t.message);
+  refs.msgRow.classList.toggle("error", isErr);
+  refs.msgIcon.hidden = !isErr;
+  refreshPortChip(refs.portChip, t);
 
   const active = ACTIVE_STATES.includes(t.state);
   refs.btnStart.disabled = active;
   refs.btnStop.disabled = !active;
-  refs.btnRetry.hidden = t.state !== "reconnecting";
-  // 指纹变更错误 (TOFU 拒绝): 给一条「信任新指纹」的恢复路径
-  refs.btnTrust.hidden = !(
-    t.state === "error" && (t.message ?? "").includes("指纹已变更")
-  );
 
-  const vpn = isVpnShare(t);
-  refs.btnVerify.hidden = !vpn;
-  refs.btnDeploy.hidden = !vpn;
-  const vpnEnabled = vpn && t.state === "connected" && !needPassword(t);
-  refs.btnVerify.disabled = !vpnEnabled;
-  refs.btnDeploy.disabled = !vpnEnabled;
+  const since = connectedSince.get(t.id);
+  if (t.state === "connected" && since) {
+    refs.uptime.hidden = false;
+    refs.uptime.textContent = fmtUptime(Date.now() - since);
+  } else {
+    refs.uptime.hidden = true;
+  }
 
   if (t.state === "connecting" || t.state === "connected") {
     refs.pwBar.classList.add("hidden"); // 已受理, 收起密码条
@@ -267,15 +319,18 @@ function updateRow(t: TunnelDto) {
   refreshNavDot();
 }
 
-/** 把一批隧道行渲染进容器 (总览页/服务器详情页共用; rowRefs 单容器假设: 同一时刻只显示一页) */
+/** 把一批隧道行渲染进容器 (总览页/服务器详情页共用; rowRefs 单容器假设: 同一时刻只显示一页)。
+ * U4 行结构: head(展开|名称+形态+端口chip|状态徽章|时长|启动/停止+⋯) + 摘要行 + 消息行 + 详情 */
 function renderTunnelRows(container: HTMLElement, list: TunnelDto[]) {
+  closeMenus(); // 行将整表重建, 悬挂的菜单锚点一并收掉
   container.innerHTML = "";
   for (const t of list) {
     const profile = profiles.find((p) => p.id === t.profileId);
+    noteConnected(t); // 非事件路径进 connected (初始加载/拉取) 从本时刻起算
     const card = document.createElement("div");
     card.className = "card tunnel-card";
 
-    // --- 头部: 展开钮 + 名称/形态/摘要 + 状态徽章 + 操作 ---
+    // --- 头部: 展开钮 + 名称/形态/端口chip + 状态徽章 + 运行时长 + 主操作/⋯ ---
     const head = document.createElement("div");
     head.className = "tunnel-head";
 
@@ -289,76 +344,55 @@ function renderTunnelRows(container: HTMLElement, list: TunnelDto[]) {
     title.className = "tunnel-title";
     title.innerHTML =
       `<strong>${escapeHtml(t.name)}</strong>` +
-      `<span class="tunnel-kind">${kindLabel(t.kind)}</span>` +
-      `<span class="tunnel-sub">${escapeHtml(profile ? `${profile.name} · ${profile.host}` : "档案缺失")} — ${escapeHtml(summary(t))}</span>`;
+      `<span class="tunnel-kind">${kindLabel(t.kind)}</span>`;
+    const portChip = document.createElement("span");
+    title.append(portChip);
 
-    const badge = document.createElement("span");
-    badge.className = `badge ${t.state}`;
-    badge.textContent = STATUS_TEXT[t.state] ?? t.state;
+    const status = document.createElement("span");
+    status.className = `status-badge ${t.state}`;
+
+    const uptime = document.createElement("span");
+    uptime.className = "tunnel-uptime";
+    uptime.hidden = true;
 
     const actions = document.createElement("div");
     actions.className = "tunnel-actions";
-    // 开机自启开关 (enabled 字段; 系统启动时后台拉起)
-    const autoWrap = document.createElement("label");
-    autoWrap.className = "check-inline";
-    autoWrap.title =
-      "开机自启: 系统启动时后台拉起此隧道 (需私钥认证档案; 密码/加密私钥无法免交互启动)";
-    const autoChk = document.createElement("input");
-    autoChk.type = "checkbox";
-    autoChk.checked = t.enabled;
-    const autoText = document.createElement("span");
-    autoText.textContent = "自启";
-    autoWrap.append(autoChk, autoText);
-    autoChk.addEventListener("change", async () => {
-      try {
-        tunnels = await invoke<TunnelDto[]>("tunnel_set_enabled", {
-          id: t.id,
-          enabled: autoChk.checked,
-        });
-        if (autoChk.checked && profile && !profile.identityFile) {
-          appendLog(
-            t.id,
-            "提示: 该档案为密码认证, 开机自启时无法免交互启动; 建议为服务器配置私钥路径"
-          );
-        }
-        renderHosts();
-      } catch (err) {
-        appendLog(t.id, `❌ ${err}`);
-      }
-    });
-    const mkBtn = (text: string, cls = "") => {
-      const b = document.createElement("button");
-      b.type = "button";
-      b.textContent = text;
-      if (cls) b.className = cls;
-      actions.append(b);
-      return b;
-    };
-    const btnStart = mkBtn("启动");
-    const btnStop = mkBtn("停止");
-    const btnRetry = mkBtn("立即重试");
-    const btnTrust = mkBtn("信任新指纹");
-    btnTrust.title = "服务器指纹变更被拒后, 清除记录并重连 (仅服务器确已重装/更换时使用)";
-    const btnVerify = mkBtn("验证外网");
-    btnVerify.title = "在服务器上经隧道测试访问外网 (google)";
-    btnVerify.innerHTML = `${icon("globe", 13)}<span class="btn-label">验证外网</span>`;
-    const btnDeploy = mkBtn("部署 proxy");
-    btnDeploy.title = "部署 proxy 命令, 服务器上可 'proxy curl ...' 走隧道";
-    btnDeploy.innerHTML = `${icon("terminal", 13)}<span class="btn-label">部署 proxy</span>`;
-    const btnScenario = mkBtn("存为场景");
-    btnScenario.title = "把这条隧道的形态/参数存为「我的场景」, 新建隧道时复用";
-    const btnDelete = mkBtn("删除", "danger");
-    btnDelete.title = "删除隧道配置";
+    const btnStart = document.createElement("button");
+    btnStart.type = "button";
+    btnStart.innerHTML = `${icon("play", 13)}<span class="btn-label">启动</span>`;
+    const btnStop = document.createElement("button");
+    btnStop.type = "button";
+    btnStop.innerHTML = `${icon("square", 13)}<span class="btn-label">停止</span>`;
+    const moreBtn = document.createElement("button");
+    moreBtn.type = "button";
+    moreBtn.className = "icon-btn more-btn";
+    moreBtn.innerHTML = icon("ellipsis", 16);
+    moreBtn.setAttribute("aria-label", "更多操作");
+    moreBtn.title = "更多操作";
+    actions.append(btnStart, btnStop, moreBtn);
 
-    head.append(expand, title, badge, autoWrap, actions);
+    head.append(expand, title, status, uptime, actions);
     card.append(head);
 
-    // --- 状态消息行 (重连进度 / 错误信息) ---
+    // --- 摘要行 (服务器 · 参数概览; ellipsis + title 全文) ---
+    const sub = document.createElement("div");
+    sub.className = "tunnel-sub";
+    sub.textContent = profile
+      ? `${profile.name} · ${profile.host} — ${summary(t)}`
+      : `档案缺失 — ${summary(t)}`;
+    sub.title = sub.textContent;
+    card.append(sub);
+
+    // --- 状态消息行 (重连进度 / 错误信息; error 态警示图标红字) ---
     const msgRow = document.createElement("div");
     msgRow.className = "tunnel-msg hidden";
+    const msgIcon = document.createElement("span");
+    msgIcon.className = "tunnel-msg-ic";
+    msgIcon.innerHTML = icon("triangle-alert", 13);
+    msgIcon.hidden = true;
     const msg = document.createElement("span");
     msg.className = "tunnel-msg-text";
-    msgRow.append(msg);
+    msgRow.append(msgIcon, msg);
     card.append(msgRow);
 
     // --- 详情: 密码条 + 日志 ---
@@ -388,23 +422,31 @@ function renderTunnelRows(container: HTMLElement, list: TunnelDto[]) {
     container.append(card);
 
     const refs: RowRefs = {
-      badge,
+      status,
+      portChip,
+      uptime,
       msg,
+      msgIcon,
       msgRow,
       pre,
       pwBar,
       pwInput,
       btnStart,
       btnStop,
-      btnRetry,
-      btnTrust,
-      btnVerify,
-      btnDeploy,
+      moreBtn,
     };
     rowRefs.set(t.id, refs);
     detail.classList.toggle("hidden", !expanded.has(t.id));
     expand.classList.toggle("open", expanded.has(t.id));
     updateRow(t);
+
+    // 密码草稿保护: 正在输入的密码经整表重绘回填并恢复焦点
+    const draft = pwDrafts.get(t.id);
+    if (draft && t.state !== "connecting" && t.state !== "connected") {
+      pwInput.value = draft;
+      pwBar.classList.remove("hidden");
+      pwInput.focus();
+    }
 
     // --- 接线 ---
     expand.addEventListener("click", () => {
@@ -425,6 +467,7 @@ function renderTunnelRows(container: HTMLElement, list: TunnelDto[]) {
       try {
         await invoke("tunnel_start", { id: t.id, password: password || null });
         passwords.set(t.profileId, password);
+        pwDrafts.delete(t.id);
         pwBar.classList.add("hidden");
       } catch (err) {
         appendLog(t.id, `❌ ${err}`);
@@ -449,6 +492,7 @@ function renderTunnelRows(container: HTMLElement, list: TunnelDto[]) {
       }
       await withLoading(pwBtn, () => doStart(pwInput.value || null), "连接中...");
     });
+    pwInput.addEventListener("input", () => pwDrafts.set(t.id, pwInput.value));
     pwInput.addEventListener("keydown", (e) => {
       if (e.key === "Enter") pwBtn.click();
     });
@@ -460,36 +504,31 @@ function renderTunnelRows(container: HTMLElement, list: TunnelDto[]) {
         appendLog(t.id, `❌ ${err}`);
       }
     });
-    btnRetry.addEventListener("click", async () => {
-      try {
-        await invoke("tunnel_retry_now", { id: t.id });
-      } catch (err) {
-        appendLog(t.id, `❌ ${err}`);
-      }
-    });
-    btnTrust.addEventListener("click", async () => {
-      const profile = profiles.find((p) => p.id === t.profileId);
-      if (!profile) {
+
+    // --- ⋯ 菜单条目动作 (打开时惰性求值, 这里只定义) ---
+    const trustNewFingerprint = async () => {
+      const prof = profiles.find((p) => p.id === t.profileId);
+      if (!prof) {
         appendLog(t.id, "❌ 隧道关联的档案缺失, 无法定位指纹记录");
         return;
       }
       const ok = await dialog({
         title: "信任新指纹并重连?",
-        body: `将清除 ${profile.host}:${profile.port} 的旧指纹记录, 重连后重新记忆当前指纹。\n仅当服务器确已重装/更换时继续 —— 否则可能是中间人攻击。`,
+        body: `将清除 ${prof.host}:${prof.port} 的旧指纹记录, 重连后重新记忆当前指纹。\n仅当服务器确已重装/更换时继续 —— 否则可能是中间人攻击。`,
         confirmText: "信任并重连",
         danger: true,
       });
       if (!ok) return;
       try {
-        await invoke("known_hosts_forget", { host: profile.host, port: profile.port });
-        appendLog(t.id, `已清除 ${profile.host}:${profile.port} 的指纹记录, 重连后将重新记忆当前指纹`);
+        await invoke("known_hosts_forget", { host: prof.host, port: prof.port });
+        appendLog(t.id, `已清除 ${prof.host}:${prof.port} 的指纹记录, 重连后将重新记忆当前指纹`);
       } catch (err) {
         appendLog(t.id, `❌ ${err}`);
         return;
       }
       // 复用启动路径: 有缓存密码直接重启, 否则展开密码条
       btnStart.click();
-    });
+    };
     const runAction = async (cmd: "verify_remote_tunnel" | "deploy_wrapper") => {
       if (!passwords.has(t.profileId)) {
         appendLog(t.id, "需要凭据: 请先启动隧道 (或重新输入密码/口令)");
@@ -497,33 +536,24 @@ function renderTunnelRows(container: HTMLElement, list: TunnelDto[]) {
         return;
       }
       const pass = passwords.get(t.profileId) ?? null;
-      const btn = cmd === "verify_remote_tunnel" ? btnVerify : btnDeploy;
-      // busy 态只改 .btn-label 文案 (SVG 不丢), 完成后按最新状态刷新按钮可用性
-      await withLoading(
-        btn,
-        async () => {
-          try {
-            await invoke<string>(cmd, { id: t.id, password: pass || null });
-            // 输出经 tunnel-log 事件回流行内日志, 此处不重复
-          } catch (err) {
-            appendLog(t.id, `❌ ${err}`);
-          }
-        },
-        "执行中..."
-      );
-      const cur = currentTunnel(t.id);
-      if (cur) updateRow(cur);
+      // busy 挂在行内 ⋯ 钮上 (菜单即点即关, 反馈落在持久元素)
+      await withLoading(moreBtn, async () => {
+        try {
+          await invoke<string>(cmd, { id: t.id, password: pass || null });
+          // 输出经 tunnel-log 事件回流行内日志, 此处不重复
+        } catch (err) {
+          appendLog(t.id, `❌ ${err}`);
+        }
+      });
     };
-    btnVerify.addEventListener("click", () => runAction("verify_remote_tunnel"));
-    btnDeploy.addEventListener("click", () => runAction("deploy_wrapper"));
-    btnScenario.addEventListener("click", async () => {
+    const saveScenario = async () => {
       const r = await dialog({
         title: "存为我的场景",
         body: "以当前隧道的形态与参数保存, 新建隧道时直接复用。",
         input: { value: t.name, placeholder: "场景名称" },
         confirmText: "保存",
       });
-      // 确认但空名视为取消 (原 prompt 语义)
+      // 确认但空名视为取消
       if (typeof r !== "string" || !r.trim()) return;
       const name = r.trim();
       try {
@@ -540,8 +570,8 @@ function renderTunnelRows(container: HTMLElement, list: TunnelDto[]) {
       } catch (err) {
         appendLog(t.id, `❌ 保存场景失败: ${err}`);
       }
-    });
-    btnDelete.addEventListener("click", async () => {
+    };
+    const deleteTunnel = async () => {
       const ok = await dialog({
         title: `删除隧道「${t.name}」?`,
         body: "运行中的隧道会先停止。",
@@ -551,12 +581,103 @@ function renderTunnelRows(container: HTMLElement, list: TunnelDto[]) {
       if (!ok) return;
       try {
         tunnels = await invoke<TunnelDto[]>("tunnel_delete", { id: t.id });
+        connectedSince.delete(t.id);
+        pwDrafts.delete(t.id);
         renderHosts();
         renderCurrentPage();
         if (detailView === "detail") renderServerDetail();
       } catch (err) {
         appendLog(t.id, `❌ ${err}`);
       }
+    };
+
+    /** 打开瞬间取最新状态计算条目 (hidden/disabled 按当时 state 出没, 与重绘解耦) */
+    const menuItems = (): MenuItem[] => {
+      const cur = currentTunnel(t.id) ?? t;
+      const prof = profiles.find((p) => p.id === cur.profileId);
+      const items: MenuItem[] = [];
+      if (cur.state === "reconnecting") {
+        items.push({
+          label: "立即重试",
+          icon: "rotate-ccw",
+          action: async () => {
+            try {
+              await invoke("tunnel_retry_now", { id: cur.id });
+            } catch (err) {
+              appendLog(cur.id, `❌ ${err}`);
+            }
+          },
+        });
+      }
+      if (cur.state === "error" && (cur.message ?? "").includes("指纹已变更")) {
+        items.push({
+          label: "信任新指纹",
+          icon: "shield-check",
+          title: "服务器指纹变更被拒后, 清除记录并重连 (仅服务器确已重装/更换时使用)",
+          action: trustNewFingerprint,
+        });
+      }
+      if (isVpnShare(cur)) {
+        const vpnEnabled = cur.state === "connected" && !needPassword(cur);
+        items.push(
+          {
+            label: "验证外网",
+            icon: "globe",
+            title: "在服务器上经隧道测试访问外网 (google)",
+            disabled: !vpnEnabled,
+            action: () => runAction("verify_remote_tunnel"),
+          },
+          {
+            label: "部署 proxy",
+            icon: "terminal",
+            title: "部署 proxy 命令, 服务器上可 'proxy curl ...' 走隧道",
+            disabled: !vpnEnabled,
+            action: () => runAction("deploy_wrapper"),
+          },
+        );
+      }
+      if (items.length) items.push({ separator: true });
+      items.push({
+        label: "存为场景",
+        icon: "bookmark",
+        title: "把这条隧道的形态/参数存为「我的场景」, 新建隧道时复用",
+        action: saveScenario,
+      });
+      items.push({
+        label: "开机自启",
+        icon: "power",
+        checked: cur.enabled,
+        title: "系统启动时后台拉起此隧道 (需私钥认证档案; 密码/加密私钥无法免交互启动)",
+        action: async () => {
+          try {
+            tunnels = await invoke<TunnelDto[]>("tunnel_set_enabled", {
+              id: cur.id,
+              enabled: !cur.enabled,
+            });
+            if (!cur.enabled && prof && !prof.identityFile) {
+              appendLog(
+                cur.id,
+                "提示: 该档案为密码认证, 开机自启时无法免交互启动; 建议为服务器配置私钥路径"
+              );
+            }
+            renderHosts();
+          } catch (err) {
+            appendLog(cur.id, `❌ ${err}`);
+          }
+        },
+      });
+      items.push({ separator: true });
+      items.push({ label: "删除", icon: "trash-2", danger: true, title: "删除隧道配置", action: deleteTunnel });
+      return items;
+    };
+
+    moreBtn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      if (menuTag() === t.id) {
+        closeMenus(); // 再点同一 ⋯ = 关闭
+        return;
+      }
+      openMenu(moreBtn, menuItems, t.id);
     });
   }
   refreshNavDot();
@@ -598,6 +719,7 @@ listen("tunnel-status", (e) => {
   if (t) {
     t.state = p.state;
     t.message = p.message;
+    noteConnected(t); // 进/出 connected 维护 uptime 起算点
     updateRow(t);
     if (p.message && p.state !== "connected")
       appendLog(p.id, p.state === "error" ? `❌ ${p.message}` : p.message);
@@ -614,6 +736,15 @@ listen("tunnel-log", (e) => {
   const p = e.payload as { id: string; kind: string; msg: string };
   appendLog(p.id, p.msg);
 });
+
+/** uptime 走字: 30s 只改已显示行的 uptime.textContent, 绝不重绘 */
+setInterval(() => {
+  for (const [id, refs] of rowRefs) {
+    if (refs.uptime.hidden) continue;
+    const since = connectedSince.get(id);
+    refs.uptime.textContent = since ? fmtUptime(Date.now() - since) : "";
+  }
+}, 30_000);
 
 // ---------- 服务器块 (中列, Termius 式) ----------
 function profileAggregate(p: Profile): { total: number; running: number; state: string } {

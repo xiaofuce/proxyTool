@@ -423,42 +423,38 @@ button.danger:hover:not(:disabled) {
   margin: 0;
 }
 
-/* ---------- 状态徽章 ---------- */
-.status-row {
-  display: flex;
+/* ---------- 状态徽章: 圆点 + 文字, --sc 驱动软底软边 ----------
+ * 五态语义: connected 绿 / connecting 蓝 / reconnecting 琥珀 /
+ * error 红 / disconnected 中性灰 (未启动 ≠ 失败) */
+.status-badge {
+  display: inline-flex;
   align-items: center;
-  gap: 12px;
-  margin-bottom: 12px;
-}
-
-.badge {
-  display: inline-block;
-  padding: 5px 14px;
+  gap: 6px;
+  padding: 3px 10px;
   border-radius: var(--radius-full);
-  font-size: var(--fs-md);
-  border: 1px solid var(--border);
-  color: var(--muted);
+  font-size: var(--fs-xs);
+  color: var(--sc, var(--muted));
+  background: color-mix(in srgb, var(--sc, var(--muted)) 9%, transparent);
+  border: 1px solid color-mix(in srgb, var(--sc, var(--muted)) 32%, transparent);
+  flex-shrink: 0;
 }
 
-.badge.connecting {
-  color: var(--info);
-  border-color: var(--info);
+.status-badge::before {
+  content: "";
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--sc, var(--muted));
+  flex-shrink: 0;
 }
 
-.badge.connected {
-  color: var(--success);
-  border-color: var(--success);
-}
-
-.badge.error {
-  color: var(--danger);
-  border-color: var(--danger);
-}
-
-.badge.reconnecting {
-  color: var(--warning);
-  border-color: var(--warning);
-}
+.status-badge.connected { --sc: var(--success); }
+.status-badge.connecting { --sc: var(--info); }
+.status-badge.connecting::before { animation: pulse 1.2s ease-in-out infinite; }
+.status-badge.reconnecting { --sc: var(--warning); }
+.status-badge.reconnecting::before { animation: pulse 1.2s ease-in-out infinite; }
+.status-badge.error { --sc: var(--danger); }
+.status-badge.disconnected { --sc: var(--muted); }
 
 .ar-label {
   font-size: var(--fs-md);
@@ -572,17 +568,62 @@ button.danger:hover:not(:disabled) {
   font-size: var(--fs-base);
 }
 
+/* 形态标签: 中性弱化 (信息权重让给状态徽章) */
 .tunnel-kind {
   font-size: var(--fs-xs);
-  color: var(--accent);
-  border: 1px solid var(--accent);
+  color: var(--muted);
+  background: var(--surface-2);
   border-radius: var(--radius-sm);
   padding: 0 5px;
   line-height: 18px;
+  flex-shrink: 0;
 }
 
+/* 端口 chip: 反向=服务器端口 (0=动态分配弱 chip, 回填后绿点 :port);
+ * 本地/动态=本机监听 bind:port */
+.port-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-family: "Cascadia Mono", Consolas, monospace;
+  font-size: var(--fs-xs);
+  color: var(--text-2);
+  background: var(--surface-2);
+  border-radius: var(--radius-sm);
+  padding: 0 6px;
+  line-height: 18px;
+  flex-shrink: 0;
+}
+
+.port-chip::before {
+  content: "";
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--border-strong);
+}
+
+.port-chip.bound::before {
+  background: var(--success);
+}
+
+.port-chip.dyn {
+  color: var(--muted);
+}
+
+/* 运行时长 (connected 才显示; 30s 走字只改文本不重绘) */
+.tunnel-uptime {
+  font-size: var(--fs-xs);
+  color: var(--muted);
+  min-width: 52px;
+  text-align: right;
+  flex-shrink: 0;
+  font-variant-numeric: tabular-nums;
+}
+
+/* 摘要行: 独立成行 (U4 起移出 title), 溢出省略 + title 全文兜底 */
 .tunnel-sub {
-  flex-basis: 100%;
+  margin: 5px 0 0 28px;
   font-size: var(--fs-sm);
   color: var(--muted);
   overflow: hidden;
@@ -601,31 +642,30 @@ button.danger:hover:not(:disabled) {
   font-size: var(--fs-sm);
 }
 
-/* 隧道行内「自启」开关 (开机自启 enabled) */
-.check-inline {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  flex-shrink: 0;
-  cursor: pointer;
-  font-size: var(--fs-sm);
-  color: var(--muted);
-  padding: 0 2px;
-  user-select: none;
-}
-
-.check-inline input {
-  accent-color: var(--accent);
-  cursor: pointer;
-}
-
 .tunnel-msg {
   margin: 8px 0 0 28px;
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0;
+}
+
+.tunnel-msg-ic {
+  color: var(--danger);
+  flex-shrink: 0;
 }
 
 .tunnel-msg-text {
   font-size: var(--fs-sm);
   color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* error 态消息: 红字 (msg-ic 由 updateRow 显隐) */
+.tunnel-msg.error .tunnel-msg-text {
+  color: var(--danger);
 }
 
 .tunnel-detail {
@@ -1168,4 +1208,82 @@ button.danger-primary:hover:not(:disabled) {
   display: inline-flex;
   align-items: center;
   gap: 5px;
+}
+
+/* ===================== U4: ⋯ 溢出菜单 (ui.ts 动态挂 body) ===================== */
+.menu {
+  position: fixed;
+  z-index: var(--z-menu);
+  min-width: 176px;
+  padding: 4px;
+  display: flex;
+  flex-direction: column;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-2);
+  animation: menu-in 0.12s ease-out;
+}
+
+@keyframes menu-in {
+  from { opacity: 0; transform: translateY(2px) scale(0.99); }
+}
+
+.menu-item {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  width: 100%;
+  padding: 7px 10px;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text);
+  font-size: var(--fs-md);
+  text-align: left;
+  cursor: pointer;
+}
+
+.menu-item:hover:not(:disabled) {
+  background: var(--hover);
+  color: var(--text);
+  border-color: transparent;
+}
+
+.menu-item .ic {
+  color: var(--muted);
+}
+
+.menu-item.danger,
+.menu-item.danger .ic {
+  color: var(--danger);
+}
+
+.menu-item.danger:hover:not(:disabled) {
+  color: var(--danger);
+}
+
+.menu-item .menu-label {
+  flex: 1;
+  min-width: 0;
+}
+
+/* 三态勾选位: 真 = 绿勾 / 假 = 空位占位 / 无 = 不渲染 */
+.menu-item .menu-check {
+  color: var(--success);
+}
+
+.menu-item .menu-check.off {
+  visibility: hidden;
+}
+
+.menu-sep {
+  height: 1px;
+  margin: 4px 6px;
+  background: var(--border);
+}
+
+/* ⋯ 钮收窄到图标钮尺寸 (抵消 .tunnel-actions button 的统一 padding) */
+.tunnel-actions .more-btn {
+  padding: 6px 8px;
 }

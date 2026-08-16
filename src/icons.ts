@@ -20,6 +20,12 @@ import info from "lucide-static/icons/info.svg?raw";
 import check from "lucide-static/icons/check.svg?raw";
 import circleAlert from "lucide-static/icons/circle-alert.svg?raw";
 import triangleAlert from "lucide-static/icons/triangle-alert.svg?raw";
+import ellipsis from "lucide-static/icons/ellipsis.svg?raw";
+import rotateCcw from "lucide-static/icons/rotate-ccw.svg?raw";
+import shieldCheck from "lucide-static/icons/shield-check.svg?raw";
+import bookmark from "lucide-static/icons/bookmark.svg?raw";
+import power from "lucide-static/icons/power.svg?raw";
+import trash2 from "lucide-static/icons/trash-2.svg?raw";
 
 const ICONS = {
   server,
@@ -41,6 +47,12 @@ const ICONS = {
   check,
   "circle-alert": circleAlert,
   "triangle-alert": triangleAlert,
+  ellipsis,
+  "rotate-ccw": rotateCcw,
+  "shield-check": shieldCheck,
+  bookmark,
+  power,
+  "trash-2": trash2,
 } as const;
 
 export type IconName = keyof typeof ICONS;

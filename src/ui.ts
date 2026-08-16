@@ -139,6 +139,118 @@ export function dialog(o: DialogOptions): Promise<boolean | string | null> {
   });
 }
 
+// ---------- menu: 行内 ⋯ 溢出菜单 (body 级单实例) ----------
+export interface MenuItem {
+  /** 分隔条条目可无文案 */
+  label?: string;
+  icon?: IconName;
+  danger?: boolean;
+  /** 三态: true 显勾 / false 显空位 / undefined 不显 (开关类条目) */
+  checked?: boolean;
+  disabled?: boolean;
+  hidden?: boolean;
+  separator?: boolean;
+  /** 悬停提示 */
+  title?: string;
+  action?: () => void;
+}
+
+let menuEl: HTMLDivElement | null = null;
+let menuCleanup: (() => void) | null = null;
+
+/** 关闭当前菜单 (无菜单则空操作)。renderTunnelRows 重绘前调用, 防悬挂引用 */
+export function closeMenus(): void {
+  menuCleanup?.();
+  menuCleanup = null;
+}
+
+/** 当前打开菜单的 tag (openMenu 第三参); 供「再点同一 ⋯ = 关闭」判定 */
+export function menuTag(): string | null {
+  return menuEl?.dataset.tag ?? null;
+}
+
+/**
+ * 打开菜单。items 惰性求值 —— 打开瞬间才计算 hidden/disabled,
+ * 天然解耦行重绘 (状态类条目按最新 state 出没)。
+ * tag: 调用方标识 (隧道 id), 配 menuTag() 实现锚钮二次点击关闭。
+ */
+export function openMenu(anchor: HTMLElement, items: () => MenuItem[], tag?: string): void {
+  closeMenus();
+  const list = items().filter((it) => !it.hidden);
+  if (!list.length) return;
+
+  const menu = document.createElement("div");
+  menu.className = "menu";
+  menu.setAttribute("role", "menu");
+  if (tag) menu.dataset.tag = tag;
+  for (const it of list) {
+    if (it.separator) {
+      const sep = document.createElement("div");
+      sep.className = "menu-sep";
+      menu.append(sep);
+      continue;
+    }
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "menu-item" + (it.danger ? " danger" : "");
+    btn.setAttribute("role", "menuitem");
+    btn.disabled = it.disabled === true;
+    if (it.title) btn.title = it.title;
+    const hasCheck = it.checked !== undefined;
+    btn.innerHTML =
+      (it.icon ? icon(it.icon, 14) : "") +
+      `<span class="menu-label"></span>` +
+      (hasCheck ? `<span class="menu-check">${icon("check", 13)}</span>` : "");
+    btn.querySelector<HTMLElement>(".menu-label")!.textContent = it.label ?? "";
+    if (it.checked === false) btn.querySelector<HTMLElement>(".menu-check")!.classList.add("off");
+    btn.addEventListener("click", () => {
+      closeMenus();
+      it.action?.();
+    });
+    menu.append(btn);
+  }
+  document.body.append(menu);
+  menuEl = menu;
+
+  // 定位: 右对齐锚点下方; 越出视口则翻转 (先渲染量尺寸再落位, 不闪)
+  const r = anchor.getBoundingClientRect();
+  menu.style.visibility = "hidden";
+  const mw = menu.offsetWidth;
+  const mh = menu.offsetHeight;
+  let x = Math.min(Math.max(8, r.right - mw), innerWidth - 8 - mw);
+  let y = r.bottom + 4;
+  if (y + mh > innerHeight - 8) y = Math.max(8, r.top - mh - 4);
+  menu.style.left = `${x}px`;
+  menu.style.top = `${y}px`;
+  menu.style.visibility = "";
+
+  const onDown = (e: PointerEvent) => {
+    const tgt = e.target;
+    if (tgt instanceof Node && (menu.contains(tgt) || anchor.contains(tgt))) return;
+    // 锚点自身交由其 click 处理 (menuTag 命中 → 关闭, 实现 ⋯ 再点关闭)
+    closeMenus();
+  };
+  const onKey = (e: KeyboardEvent) => {
+    if (e.key === "Escape") closeMenus();
+  };
+  const onReflow = () => closeMenus();
+  document.addEventListener("pointerdown", onDown, true);
+  document.addEventListener("keydown", onKey, true);
+  window.addEventListener("scroll", onReflow, true); // capture: 任意可滚容器
+  window.addEventListener("resize", onReflow);
+
+  menuCleanup = () => {
+    document.removeEventListener("pointerdown", onDown, true);
+    document.removeEventListener("keydown", onKey, true);
+    window.removeEventListener("scroll", onReflow, true);
+    window.removeEventListener("resize", onReflow);
+    menu.remove();
+    menuEl = null;
+  };
+
+  menu.querySelector<HTMLButtonElement>(".menu-item:not(:disabled)")?.focus();
+}
+
 // ---------- withLoading: 按钮 busy 态 (disabled + spinner + 文案) ----------
 /**
  * 只改 .btn-label 的 textContent (图标 SVG 不丢); 无 .btn-label 的纯文本钮
