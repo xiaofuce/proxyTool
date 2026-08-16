@@ -71,13 +71,7 @@ core/        隧道引擎 (纯 Rust): engine/ 注册表+状态机, transport/ �
              direct/ -L 与 -D, pool/ 共享连接, secrets/ 凭据加密, known_hosts/ TOFU
 src-tauri/   Tauri GUI 桥接: 命令面 + 事件桥 + 托盘/自启
 src/         前端 (TypeScript, 无框架): main/ui/theme/icons/i18n
-docs/        设计文档与重构记录
 ```
-
-## 文档
-
-- [设计文档（调研结论）](docs/设计文档-调研结论.md)
-- [重构设计](docs/重构设计.md) / [重构计划](docs/重构计划.md)
 
 ---
 
@@ -154,5 +148,4 @@ core/        tunnel engine (pure Rust): engine/ registry+state machine, transpor
              direct/ -L and -D, pool/ shared connections, secrets/ credential encryption, known_hosts/ TOFU
 src-tauri/   Tauri GUI bridge: commands + event bridge + tray/autostart
 src/         frontend (TypeScript, no framework): main/ui/theme/icons/i18n
-docs/        design docs and refactoring notes
 ```
