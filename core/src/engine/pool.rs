@@ -116,16 +116,29 @@ impl Lease {
                 ..
             } => {
                 conn.leases.lock().unwrap().retain(|l| l.tunnel_id != self.tunnel_id);
-                if conn.leases.lock().unwrap().is_empty() {
+                // **末位租约** → 整连断开 (兄弟租约仍在则连接保留, 停一条隧道
+                // 绝不能断掉同档案其他隧道 —— e2e shared_conn_data_path 回归锁死)。
+                // R8: 原实现持写锁跨 disconnect await, 网络差时阻塞同档案其他
+                // 租约的准入/释放; 改先摘表再 await —— 并发 acquire 见 None
+                // 立即建新连接; 新旧连接短暂并存的端口竞争由 sshd 拒绝 +
+                // 1s 快退避自愈。**注意重构时勿删 is_empty 守卫** (曾删掉导致
+                // 停一条断全部, 已修)。
+                if !conn.leases.lock().unwrap().is_empty() {
+                    return;
+                }
+                let victim = {
                     let mut guard = conn.inner.write().await;
-                    let victim = guard
+                    let v = guard
                         .as_ref()
                         .filter(|cs| cs.generation == generation)
                         .map(|cs| cs.state.handle.clone());
-                    if let Some(handle) = victim {
-                        disconnect_handle(&handle, "last lease released").await;
+                    if v.is_some() {
                         *guard = None;
                     }
+                    v
+                };
+                if let Some(handle) = victim {
+                    disconnect_handle(&handle, "last lease released").await;
                 }
             }
         }
@@ -256,11 +269,16 @@ impl ConnPool {
     pub async fn force_disconnect(&self, profile_id: &str) {
         let conn = self.map.lock().unwrap().get(profile_id).cloned();
         if let Some(conn) = conn {
-            let mut guard = conn.inner.write().await;
-            let victim = guard.as_ref().map(|cs| cs.state.handle.clone());
+            let victim = {
+                let mut guard = conn.inner.write().await;
+                let v = guard.as_ref().map(|cs| cs.state.handle.clone());
+                if v.is_some() {
+                    *guard = None; // 同 Lease::close: 先摘表再断开, 不持锁跨 await
+                }
+                v
+            };
             if let Some(handle) = victim {
                 disconnect_handle(&handle, "forced disconnect").await;
-                *guard = None;
             }
         }
     }

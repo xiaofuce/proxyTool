@@ -2,6 +2,7 @@
 // 消费 styles.css 的设计 tokens, 不引框架; toast 栈与 modal 挂 body 级,
 // 行内重绘 (renderTunnelRows 整表 innerHTML="") 不会销毁它们。
 import { icon, type IconName } from "./icons";
+import { t } from "./i18n";
 
 // ---------- toast: 右下角栈, 同屏最多 4 条 ----------
 export type ToastKind = "info" | "success" | "error";
@@ -89,6 +90,11 @@ export interface DialogOptions {
  */
 export function dialog(o: DialogOptions): Promise<boolean | string | null> {
   return new Promise((resolve) => {
+    // 打开期间背景 inert (模态外的 Tab 焦点被隔离); modal/toast 挂在 body 层, 不受影响
+    const appRoot = document.querySelector<HTMLElement>(".app");
+    const prevFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    appRoot?.setAttribute("inert", "");
+
     const overlay = document.createElement("div");
     overlay.className = "modal-overlay";
 
@@ -117,11 +123,11 @@ export function dialog(o: DialogOptions): Promise<boolean | string | null> {
     actions.className = "modal-actions";
     const btnCancel = document.createElement("button");
     btnCancel.type = "button";
-    btnCancel.textContent = o.cancelText ?? "取消";
+    btnCancel.textContent = o.cancelText ?? t("common.cancel");
     const btnConfirm = document.createElement("button");
     btnConfirm.type = "button";
     btnConfirm.className = o.danger ? "danger-primary" : "primary";
-    btnConfirm.textContent = o.confirmText ?? "确定";
+    btnConfirm.textContent = o.confirmText ?? t("common.ok");
     actions.append(btnCancel, btnConfirm);
 
     modal.append(title);
@@ -143,6 +149,8 @@ export function dialog(o: DialogOptions): Promise<boolean | string | null> {
       settled = true;
       document.removeEventListener("keydown", onKey, true);
       overlay.remove();
+      appRoot?.removeAttribute("inert");
+      if (prevFocus?.isConnected) prevFocus.focus(); // 焦点返还 (未销毁的元素)
       resolve(r);
     };
     const onKey = (e: KeyboardEvent) => {

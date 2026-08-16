@@ -95,6 +95,12 @@ fn key_load_error(path: &std::path::Path, e: russh::keys::Error) -> TunnelError 
     }
 }
 
+/// 私钥按路径缓存 (R8): 加密私钥 KDF 每次重连都重算 (~数百 ms), 同路径密钥不变。
+/// 加载失败不缓存 (口令可能输错, 下次重试重载); 换钥后重启进程即清 (桌面工具可接受)。
+static KEY_CACHE: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<String, Arc<russh::keys::PrivateKey>>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+
 /// 连接服务器 + 认证 (密码或私钥), 返回会话句柄。凭据仅用于内存认证, 不落盘。
 /// 错误为 TunnelError: Connect(网络)/AuthIo(认证阶段通信失败) 可重试,
 /// AuthRejected(密码被拒)/KeyLoad(私钥文件问题) 致命 —— 重连循环按 retryable() 决策。
@@ -107,11 +113,12 @@ pub async fn connect_auth<H: client::Handler<Error = russh::Error> + Send + 'sta
     handler: H,
     logger: &Logger,
 ) -> Result<client::Handle<H>, TunnelError> {
-    let mut config = client::Config::default();
-    config.keepalive_interval = Some(keepalive.interval);
-    // russh keepalive_max: usize; policy 用 u32, 收敛并至少 1
-    config.keepalive_max = (keepalive.max as usize).max(1);
-    let config = Arc::new(config);
+    let config = Arc::new(client::Config {
+        keepalive_interval: Some(keepalive.interval),
+        // russh keepalive_max: usize; policy 用 u32, 收敛并至少 1
+        keepalive_max: (keepalive.max as usize).max(1),
+        ..Default::default()
+    });
 
     let addr = format!("{server_host}:{server_port}");
     logger(&format!("连接 {addr} ..."));
@@ -128,15 +135,27 @@ pub async fn connect_auth<H: client::Handler<Error = russh::Error> + Send + 'sta
             .await
             .map_err(|e| TunnelError::AuthIo { source: e })?,
         AuthMethod::KeyFile { path, passphrase } => {
-            let key = russh::keys::load_secret_key(path, passphrase.as_deref())
-                .map_err(|e| key_load_error(path, e))?;
+            let path_str = path.display().to_string();
+            // 缓存命中复用; 未命中才读盘解析 (KDF 昂贵)
+            let cached = KEY_CACHE.lock().unwrap().get(&path_str).cloned();
+            let key = match cached {
+                Some(k) => k,
+                None => {
+                    let k = Arc::new(
+                        russh::keys::load_secret_key(path, passphrase.as_deref())
+                            .map_err(|e| key_load_error(path, e))?,
+                    );
+                    KEY_CACHE.lock().unwrap().insert(path_str, k.clone());
+                    k
+                }
+            };
             // RSA 需要显式哈希 (russh 直传 None 会落到 SHA-1), 其余算法忽略
             let hash_alg = if key.algorithm().is_rsa() {
                 Some(russh::keys::HashAlg::Sha256)
             } else {
                 None
             };
-            let key = russh::keys::PrivateKeyWithHashAlg::new(Arc::new(key), hash_alg);
+            let key = russh::keys::PrivateKeyWithHashAlg::new(key, hash_alg);
             session
                 .authenticate_publickey(username, key)
                 .await

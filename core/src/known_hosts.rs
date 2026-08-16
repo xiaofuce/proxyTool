@@ -58,6 +58,18 @@ fn persist(path: &Path, entries: &BTreeMap<String, KnownHost>) {
     }
 }
 
+/// 落盘调度 (R8): 有 tokio 运行时 → spawn_blocking, 否则 (同步测试) 直接写。
+/// 写的是完整快照; 并发 remember 的末位写入可能覆盖早位 —— 代价只是指纹被
+/// 遗忘后下次重 TOFU, 无损坏 (旧实现持锁串行写同样是末写胜出)。
+fn persist_async(path: PathBuf, entries: BTreeMap<String, KnownHost>) {
+    match tokio::runtime::Handle::try_current() {
+        Ok(handle) => {
+            handle.spawn_blocking(move || persist(&path, &entries));
+        }
+        Err(_) => persist(&path, &entries),
+    }
+}
+
 impl KnownHosts {
     /// 不落盘的记忆库 (测试)
     pub fn in_memory() -> Arc<Self> {
@@ -101,28 +113,29 @@ impl KnownHosts {
             .collect()
     }
 
-    /// 写入一条记忆 (TOFU 首次 / UI 信任新指纹) + 落盘
+    /// 写入一条记忆 (TOFU 首次 / UI 信任新指纹)。内存立即生效;
+    /// 落盘挪后台 —— check_server_key 握手回调里做同步 IO 会阻塞连接消息循环。
     pub fn remember(&self, host: &str, port: u16, entry: KnownHost) {
-        self.entries
-            .lock()
-            .unwrap()
-            .insert(key_of(host, port), entry);
-        if let Some(dir) = &self.dir {
-            persist(&dir.join("known_hosts.json"), &self.entries.lock().unwrap());
+        let (dir, snapshot) = {
+            let mut entries = self.entries.lock().unwrap();
+            entries.insert(key_of(host, port), entry);
+            (self.dir.clone(), entries.clone())
+        };
+        if let Some(dir) = dir {
+            persist_async(dir.join("known_hosts.json"), snapshot);
         }
     }
 
-    /// 清除一条记忆 (服务器重装/换机后用户确认) + 落盘。返回是否确有删除。
+    /// 清除一条记忆 (服务器重装/换机后用户确认), 返回是否确有删除。落盘同后台。
     pub fn forget(&self, host: &str, port: u16) -> bool {
-        let removed = self
-            .entries
-            .lock()
-            .unwrap()
-            .remove(&key_of(host, port))
-            .is_some();
+        let (dir, snapshot, removed) = {
+            let mut entries = self.entries.lock().unwrap();
+            let removed = entries.remove(&key_of(host, port)).is_some();
+            (self.dir.clone(), entries.clone(), removed)
+        };
         if removed {
-            if let Some(dir) = &self.dir {
-                persist(&dir.join("known_hosts.json"), &self.entries.lock().unwrap());
+            if let Some(dir) = dir {
+                persist_async(dir.join("known_hosts.json"), snapshot);
             }
         }
         removed

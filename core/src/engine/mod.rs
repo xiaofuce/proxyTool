@@ -270,13 +270,20 @@ impl Registry {
             events,
             on_bound_port,
         ));
-        self.entries
-            .lock()
-            .unwrap()
-            .get_mut(id)
-            .expect("启动期间条目不会消失")
-            .task = Some(task);
-        Ok(())
+        // 二次锁内条目可能已被并发 delete 摘走 (R8: 原 expect 在此直接 panic)。
+        // 此时中止刚派出的任务并报错 —— 用户删除优先, 任务不会复活幽灵条目。
+        let mut entries = self.entries.lock().unwrap();
+        match entries.get_mut(id) {
+            Some(e) => {
+                e.task = Some(task);
+                Ok(())
+            }
+            None => {
+                drop(entries);
+                task.abort();
+                Err("隧道已被删除".into())
+            }
+        }
     }
 
     /// 停止隧道: 置停止意图 + 硬断开当前会话 (任务检测到后收尾退出)

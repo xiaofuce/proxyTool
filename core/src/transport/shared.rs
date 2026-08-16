@@ -157,14 +157,14 @@ async fn bridge_forwarded(
             return;
         }
     };
-    (logger)(&format!("已连接本地代理 {target}"));
+    // 一条连接只记一条日志 (R8: 原「已连接 + 连接关闭」两条, 转发风暴下刷屏)
     if let Err(e) = stream.write_all(&head).await {
-        (logger)(&format!("写回首字节失败: {e}"));
+        (logger)(&format!("本地代理 {target} 写回首字节失败: {e}"));
         return;
     }
 
     let r = tokio::io::copy_bidirectional(&mut stream, &mut chan).await;
-    (logger)(&format!("连接关闭 ({r:?})"));
+    (logger)(&format!("本地代理 {target} 连接结束 ({r:?})"));
 }
 
 /// 通道计数达到预算时告警 (服务器发起的转发 / 客户端发起的直连共用文案)。
@@ -211,6 +211,7 @@ pub struct SharedState {
 /// 建连入口: 构造 SharedHandler 并完成连接 + 认证。
 /// 主机密钥经 known_hosts TOFU 校验, 指纹变更 → `TunnelError::HostKeyChanged`
 /// (致命, 见 known_hosts.rs 的 take_error 手法)。
+#[allow(clippy::too_many_arguments)]
 pub async fn connect(
     server_host: &str,
     server_port: u16,

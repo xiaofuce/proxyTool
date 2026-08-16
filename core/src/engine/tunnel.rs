@@ -78,6 +78,7 @@ async fn backoff_wait(stop: &AtomicBool, retry_now: &AtomicBool, dur: Duration) 
 /// 单隧道运行任务 (由 Registry 启动)。
 /// `on_bound_port`: 反向隧道端口 0 动态分配时, 服务器实际监听端口回填回调。
 /// 退出时置终态 (Stopped/Failed) 并清空会话槽。
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn run_task(
     spec: TunnelSpec,
     creds: SshCreds,

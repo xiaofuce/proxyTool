@@ -1,3 +1,11 @@
 [workspace]
 resolver = "2"
 members = ["core", "src-tauri"]
+
+# R8 发布优化: 全链路 LTO + 单 codegen 单元 + 去符号 (安装包体积/启动都受益)。
+# panic 保持 unwind (core 无 catch_unwind, 但 abort 的代价不值得)。
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = true

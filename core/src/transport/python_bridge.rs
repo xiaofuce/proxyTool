@@ -202,7 +202,7 @@ pub(crate) async fn open_helper(
     let pt_dump = pt_dump_enabled();
     let pdump = move |logger: &Logger, msg: &str| {
         if pt_dump {
-            logger(&msg.to_string());
+            logger(msg);
         }
     };
     let fwd_task = tokio::spawn(async move {
@@ -385,6 +385,7 @@ async fn read_port_line<R: tokio::io::AsyncRead + Unpin>(
 /// 路径, 每次写入前前置审计转储 (前次写入的流量副本, 逐连接概率出现):
 /// - helper -> 本机 (sshd 写通道 socket): 每次 helper stdout 写入都被前置转储;
 /// - 本机 -> helper (sshd 写 helper stdin 管道): 实测无注入 (管道写不被审计)。
+///
 /// 双方都以"跳过注入"状态开始, 丢弃一切字节直到收到对方发来的标记帧; 标记帧
 /// 本身也丢弃 (幂等同步点, 任何状态都吸收)。之后按帧协议解析, 帧前若仍有转储
 /// 则被"丢弃标记帧前的一切"逻辑吸收。标记帧: [00 00 00 08][DE AD BE EF DE AD BE EF]。
@@ -407,6 +408,7 @@ p=int(sys.argv[1])
 p0=(p==0)
 def dbg(m):
  try:
+  if os.environ.get(\"PT_DEBUG\",\"\")!=\"1\": return
   f=open(\"/tmp/hc_dbg.log\",\"a\")
   f.write(m+\"\\n\")
   f.close()

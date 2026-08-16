@@ -12,10 +12,17 @@ edition = "2021"
 # to make the lib name unique and wouldn't conflict with the bin name.
 # This is only an issue on Windows, see https://github.com/rust-lang/cargo/issues/8519
 name = "proxy_tool_lib"
-crate-type = ["staticlib", "cdylib", "rlib"]
+# R8: 桌面应用只需 rlib (staticlib/cdylib 是移动端/插件所需, 徒增编译时间)
+crate-type = ["lib"]
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
+
+[target.'cfg(windows)'.dependencies]
+# CloseRequested 收托盘兜底用同步 ShowWindow (dispatcher hide 在该事件期间
+# 偶发不生效, 实测 hide 返回 ok 但窗口仍可见)。版本钉 0.61 系: 随依赖树
+# (tauri 解析到 0.61.2, Cargo.lock 已含; ustc 镜像索引尚无 0.62)
+windows-sys = { version = "0.61", features = ["Win32_UI_WindowsAndMessaging", "Win32_Foundation"] }
 
 [dependencies]
 tauri = { version = "2", features = ["tray-icon"] }

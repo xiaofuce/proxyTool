@@ -104,13 +104,17 @@ impl TunnelEvents for TauriEmitter {
                         .find(|(s, _)| s.id == tunnel_id)
                         .map(|(s, _)| s.profile_id);
                     let Some(profile_id) = profile_id else { return };
-                    let mut guard = state.secret_store.lock().await;
-                    if guard.contains(&profile_id) {
+                    let snapshot = {
+                        let mut guard = state.secret_store.lock().await;
+                        if !guard.contains(&profile_id) {
+                            return;
+                        }
                         guard.remove(&profile_id);
-                        if let Ok(dir) = data_dir(&app) {
-                            if let Err(e) = secrets::save_secret_store(&dir, &guard) {
-                                eprintln!("[secrets] 保存失败: {e}");
-                            }
+                        guard.clone()
+                    };
+                    if let Ok(dir) = data_dir(&app) {
+                        if let Err(e) = persist(dir, snapshot, secrets::save_secret_store).await {
+                            eprintln!("[secrets] 保存失败: {e}");
                         }
                     }
                 });
@@ -139,6 +143,19 @@ fn data_dir(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
     app.path()
         .app_data_dir()
         .map_err(|e| format!("获取应用数据目录失败: {e}"))
+}
+
+/// R8: 配置落盘统一走 spawn_blocking。调用方先 clone 快照并**丢锁**再调度 ——
+/// 避免 async 命令持 tokio Mutex 跨磁盘 IO (阻塞其他命令) 以及运行时线程
+/// 做同步文件写。save 为普通函数指针 (各 store 的 save_* 签名一致)。
+async fn persist<T: Send + 'static>(
+    dir: std::path::PathBuf,
+    snapshot: T,
+    save: fn(&std::path::Path, &T) -> Result<(), String>,
+) -> Result<(), String> {
+    tokio::task::spawn_blocking(move || save(&dir, &snapshot))
+        .await
+        .map_err(|e| format!("落盘任务异常: {e}"))?
 }
 
 /// 日志便捷函数 (命令层直接发, 不经过引擎; 发到指定隧道的日志流)
@@ -273,7 +290,7 @@ async fn start_by_profile(
         share,
         max_sessions,
     };
-    state.registry.start(&id, creds, emitter(app)).await
+    state.registry.start(id, creds, emitter(app)).await
 }
 
 /// 命令: 启动隧道 (按 spec.profile_id 查档案; 密码/口令本次注入,
@@ -297,13 +314,16 @@ async fn tunnel_start(
         };
         if let Some(profile_id) = spec_profile {
             let state = app.state::<AppState>();
-            let mut guard = state.secret_store.lock().await;
-            if remember {
-                guard.set(&profile_id, pw);
-            } else {
-                guard.remove(&profile_id);
-            }
-            if let Err(e) = secrets::save_secret_store(&data_dir(&app)?, &guard) {
+            let snapshot = {
+                let mut guard = state.secret_store.lock().await;
+                if remember {
+                    guard.set(&profile_id, pw);
+                } else {
+                    guard.remove(&profile_id);
+                }
+                guard.clone()
+            };
+            if let Err(e) = persist(data_dir(&app)?, snapshot, secrets::save_secret_store).await {
                 eprintln!("[secrets] 保存失败: {e}");
             }
         }
@@ -353,8 +373,9 @@ fn autostart_get(app: tauri::AppHandle) -> Result<bool, String> {
 }
 
 /// 命令: 设置/取消开机自启 (注册 `--autostart` 参数拉起)
+/// R8: async fn —— 自动移到 tokio worker, 不占主线程 (Windows 写 HKCU Run 键)
 #[tauri::command]
-fn autostart_set(app: tauri::AppHandle, enabled: bool) -> Result<(), String> {
+async fn autostart_set(app: tauri::AppHandle, enabled: bool) -> Result<(), String> {
     let autolaunch = app.autolaunch();
     if enabled {
         autolaunch.enable()
@@ -438,14 +459,17 @@ async fn scenario_save(
     if scenario.description.trim().is_empty() {
         scenario.description = scenario.describe();
     }
-    let mut store_guard = state.scenario_store.lock().await;
-    if let Some(s) = store_guard.scenarios.iter_mut().find(|s| s.id == scenario.id) {
-        *s = scenario;
-    } else {
-        store_guard.scenarios.push(scenario);
-    }
-    store::save_scenarios(&data_dir(&app)?, &store_guard)?;
-    Ok(store_guard.scenarios.clone())
+    let (snapshot, result) = {
+        let mut store_guard = state.scenario_store.lock().await;
+        if let Some(s) = store_guard.scenarios.iter_mut().find(|s| s.id == scenario.id) {
+            *s = scenario;
+        } else {
+            store_guard.scenarios.push(scenario);
+        }
+        (store_guard.clone(), store_guard.scenarios.clone())
+    };
+    persist(data_dir(&app)?, snapshot, store::save_scenarios).await?;
+    Ok(result)
 }
 
 /// 命令: 删除场景, 返回最新列表
@@ -455,10 +479,13 @@ async fn scenario_delete(
     state: tauri::State<'_, AppState>,
     id: String,
 ) -> Result<Vec<Scenario>, String> {
-    let mut store_guard = state.scenario_store.lock().await;
-    store_guard.scenarios.retain(|s| s.id != id);
-    store::save_scenarios(&data_dir(&app)?, &store_guard)?;
-    Ok(store_guard.scenarios.clone())
+    let (snapshot, result) = {
+        let mut store_guard = state.scenario_store.lock().await;
+        store_guard.scenarios.retain(|s| s.id != id);
+        (store_guard.clone(), store_guard.scenarios.clone())
+    };
+    persist(data_dir(&app)?, snapshot, store::save_scenarios).await?;
+    Ok(result)
 }
 
 // ---------- 命令生成页落盘 (我的命令 + 最近输入; AES-GCM 加密, 无凭据) ----------
@@ -482,14 +509,17 @@ async fn cmdgen_save(
     if recipe.id.trim().is_empty() {
         recipe.id = TunnelSpec::new_id();
     }
-    let mut store_guard = state.cmd_store.lock().await;
-    if let Some(r) = store_guard.recipes.iter_mut().find(|r| r.id == recipe.id) {
-        *r = recipe;
-    } else {
-        store_guard.recipes.push(recipe);
-    }
-    cmd_recipes::save_cmd_store(&data_dir(&app)?, &store_guard)?;
-    Ok(store_guard.recipes.clone())
+    let (snapshot, result) = {
+        let mut store_guard = state.cmd_store.lock().await;
+        if let Some(r) = store_guard.recipes.iter_mut().find(|r| r.id == recipe.id) {
+            *r = recipe;
+        } else {
+            store_guard.recipes.push(recipe);
+        }
+        (store_guard.clone(), store_guard.recipes.clone())
+    };
+    persist(data_dir(&app)?, snapshot, cmd_recipes::save_cmd_store).await?;
+    Ok(result)
 }
 
 /// 命令: 删除一条我的命令, 返回最新列表
@@ -499,10 +529,13 @@ async fn cmdgen_delete(
     state: tauri::State<'_, AppState>,
     id: String,
 ) -> Result<Vec<CmdRecipe>, String> {
-    let mut store_guard = state.cmd_store.lock().await;
-    store_guard.recipes.retain(|r| r.id != id);
-    cmd_recipes::save_cmd_store(&data_dir(&app)?, &store_guard)?;
-    Ok(store_guard.recipes.clone())
+    let (snapshot, result) = {
+        let mut store_guard = state.cmd_store.lock().await;
+        store_guard.recipes.retain(|r| r.id != id);
+        (store_guard.clone(), store_guard.recipes.clone())
+    };
+    persist(data_dir(&app)?, snapshot, cmd_recipes::save_cmd_store).await?;
+    Ok(result)
 }
 
 /// 命令: 记住最近一次输入 (前端防抖调用; 打开页面时恢复)
@@ -512,9 +545,12 @@ async fn cmdgen_set_last(
     state: tauri::State<'_, AppState>,
     params: CmdParams,
 ) -> Result<(), String> {
-    let mut store_guard = state.cmd_store.lock().await;
-    store_guard.last = Some(params);
-    cmd_recipes::save_cmd_store(&data_dir(&app)?, &store_guard)
+    let snapshot = {
+        let mut store_guard = state.cmd_store.lock().await;
+        store_guard.last = Some(params);
+        store_guard.clone()
+    };
+    persist(data_dir(&app)?, snapshot, cmd_recipes::save_cmd_store).await
 }
 
 /// 命令: 按我的场景生成隧道模板 (克隆 kind/backend; 重连策略继承档案层默认值)
@@ -560,7 +596,7 @@ async fn resolve_reverse(
         .registry
         .list()
         .into_iter()
-        .find(|(s, _)| &s.id == id)
+        .find(|(s, _)| s.id == id)
         .map(|(s, _)| s)
         .ok_or_else(|| format!("隧道不存在: {id}"))?;
     let TunnelKind::Reverse { port, .. } = spec.kind else {
@@ -743,14 +779,17 @@ async fn save_profile(
     state: tauri::State<'_, AppState>,
     profile: profiles::ServerProfile,
 ) -> Result<Vec<profiles::ServerProfile>, String> {
-    let mut store_guard = state.profile_store.lock().await;
-    if let Some(p) = store_guard.profiles.iter_mut().find(|p| p.id == profile.id) {
-        *p = profile;
-    } else {
-        store_guard.profiles.push(profile);
-    }
-    store::save_profiles(&data_dir(&app)?, &store_guard)?;
-    Ok(store_guard.profiles.clone())
+    let (snapshot, result) = {
+        let mut store_guard = state.profile_store.lock().await;
+        if let Some(p) = store_guard.profiles.iter_mut().find(|p| p.id == profile.id) {
+            *p = profile;
+        } else {
+            store_guard.profiles.push(profile);
+        }
+        (store_guard.clone(), store_guard.profiles.clone())
+    };
+    persist(data_dir(&app)?, snapshot, store::save_profiles).await?;
+    Ok(result)
 }
 
 /// 命令: 删除服务器配置档案, 返回最新列表
@@ -760,14 +799,19 @@ async fn delete_profile(
     state: tauri::State<'_, AppState>,
     id: String,
 ) -> Result<Vec<profiles::ServerProfile>, String> {
-    {
-        // 连带清除记住的凭据 (加密落盘那份; 档案没了凭据也不应残留)
+    // 连带清除记住的凭据 (加密落盘那份; 档案没了凭据也不应残留)
+    let secrets_snapshot = {
         let mut secrets_guard = state.secret_store.lock().await;
-        if secrets_guard.contains(&id) {
+        if !secrets_guard.contains(&id) {
+            None
+        } else {
             secrets_guard.remove(&id);
-            if let Err(e) = secrets::save_secret_store(&data_dir(&app)?, &secrets_guard) {
-                eprintln!("[secrets] 保存失败: {e}");
-            }
+            Some(secrets_guard.clone())
+        }
+    };
+    if let Some(snapshot) = secrets_snapshot {
+        if let Err(e) = persist(data_dir(&app)?, snapshot, secrets::save_secret_store).await {
+            eprintln!("[secrets] 保存失败: {e}");
         }
     }
     // 连带停止并删除关联隧道 (运行中的先停, 否则引擎任务残留占端口,
@@ -779,10 +823,13 @@ async fn delete_profile(
             }
         }
     }
-    let mut store_guard = state.profile_store.lock().await;
-    store_guard.profiles.retain(|p| p.id != id);
-    store::save_profiles(&data_dir(&app)?, &store_guard)?;
-    Ok(store_guard.profiles.clone())
+    let (snapshot, result) = {
+        let mut store_guard = state.profile_store.lock().await;
+        store_guard.profiles.retain(|p| p.id != id);
+        (store_guard.clone(), store_guard.profiles.clone())
+    };
+    persist(data_dir(&app)?, snapshot, store::save_profiles).await?;
+    Ok(result)
 }
 
 // ---------- 凭据记忆 (密码/口令加密落盘, R6) ----------
@@ -800,9 +847,12 @@ async fn secret_forget(
     state: tauri::State<'_, AppState>,
     profile_id: String,
 ) -> Result<(), String> {
-    let mut guard = state.secret_store.lock().await;
-    guard.remove(&profile_id);
-    secrets::save_secret_store(&data_dir(&app)?, &guard)
+    let snapshot = {
+        let mut guard = state.secret_store.lock().await;
+        guard.remove(&profile_id);
+        guard.clone()
+    };
+    persist(data_dir(&app)?, snapshot, secrets::save_secret_store).await
 }
 
 /// 命令: 读取分层默认值 (档案层, 所有档案共享)
@@ -820,10 +870,14 @@ async fn profile_defaults_save(
     state: tauri::State<'_, AppState>,
     defaults: store::ProfileDefaults,
 ) -> Result<store::ProfileDefaults, String> {
-    let mut store_guard = state.profile_store.lock().await;
-    store_guard.defaults = defaults;
-    store::save_profiles(&data_dir(&app)?, &store_guard)?;
-    Ok(store_guard.defaults.clone())
+    let snapshot = {
+        let mut store_guard = state.profile_store.lock().await;
+        store_guard.defaults = defaults;
+        store_guard.clone()
+    };
+    let saved_defaults = snapshot.defaults.clone();
+    persist(data_dir(&app)?, snapshot, store::save_profiles).await?;
+    Ok(saved_defaults)
 }
 
 // ---------- 托盘 + 开机自启 (P6) ----------
@@ -949,6 +1003,16 @@ pub fn run() {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                 api.prevent_close();
                 let _ = window.hide();
+                // R8 兜底: dispatcher.hide() 走 user-message 管线, 在 CloseRequested
+                // 处理期间部分路径不生效 (观测: hide ok 但窗口仍可见)。直接同步
+                // ShowWindow(SW_HIDE) 绕开消息管线, 与托盘「隐藏窗口」等效。
+                #[cfg(target_os = "windows")]
+                if let Ok(hwnd) = window.hwnd() {
+                    unsafe {
+                        use windows_sys::Win32::UI::WindowsAndMessaging::{ShowWindow, SW_HIDE};
+                        ShowWindow(hwnd.0, SW_HIDE);
+                    }
+                }
             }
         })
         .plugin(tauri_plugin_opener::init())

@@ -43,6 +43,14 @@ impl BackendPool {
         match backend {
             Backend::Tcp(host, port) => Ok((host.clone(), *port)),
             Backend::SocksAuto { fallback_port } => {
+                // 0. 缓存命中先于探测 (R8): 内置 SOCKS 已就绪且端口未变 → 直接复用,
+                //    免去每次重连 ~2s 的探测 (与「多条隧道共用一实例, 重连不重建」语义一致)
+                if let Some(server) = self.socks.lock().await.as_ref() {
+                    if server.port == *fallback_port {
+                        return Ok(("127.0.0.1".into(), server.port));
+                    }
+                }
+
                 // 1. 优先复用 VPN 自带的端口 (探测确认是 SOCKS5)
                 let vpn = probe::probe_local_proxy().await;
                 if let Some(found) = vpn.iter().find(|r| r.socks5_confirmed) {

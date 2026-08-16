@@ -28,20 +28,20 @@
       <aside class="sidebar">
         <div class="brand">
           <div class="brand-name">proxyTool</div>
-          <div class="brand-sub">本机 ↔ 远程 · SSH 隧道</div>
+          <div class="brand-sub" data-i18n="brand.sub">本机 ↔ 远程 · SSH 隧道</div>
         </div>
         <nav class="nav">
           <button class="nav-item active" data-page="servers">
-            <span class="nav-icon"></span><span class="nav-label">服务器</span>
+            <span class="nav-icon"></span><span class="nav-label" data-i18n="nav.servers">服务器</span>
           </button>
           <button class="nav-item" data-page="tools">
-            <span class="nav-icon"></span><span class="nav-label">命令生成</span>
+            <span class="nav-icon"></span><span class="nav-label" data-i18n="nav.tools">命令生成</span>
           </button>
           <button class="nav-item" data-page="settings">
-            <span class="nav-icon"></span><span class="nav-label">设置</span>
+            <span class="nav-icon"></span><span class="nav-label" data-i18n="nav.settings">设置</span>
           </button>
           <button class="nav-item" data-page="help">
-            <span class="nav-icon"></span><span class="nav-label">帮助</span>
+            <span class="nav-icon"></span><span class="nav-label" data-i18n="nav.help">帮助</span>
           </button>
         </nav>
       </aside>
@@ -50,8 +50,8 @@
         <!-- ========== 中列: 服务器块 (Termius 式, 服务器页显示) ========== -->
         <section class="hosts-col page" data-page="servers">
           <header class="page-head">
-            <h2>服务器</h2>
-            <p>管理你的<b>本机 ↔ 远程服务器</b> SSH 隧道 —— 点选服务器查看详情，块上的播放键一键启动</p>
+            <h2 data-i18n="servers.head">服务器</h2>
+            <p data-i18n="servers.lead">管理你的<b>本机 ↔ 远程服务器</b> SSH 隧道 —— 点选服务器查看详情，块上的播放键一键启动</p>
           </header>
           <div id="host-grid"></div>
         </section>
@@ -62,72 +62,79 @@
           <!-- 设置: 外观 + 新隧道默认值 + 开机自启 -->
           <section class="page" data-page="settings">
             <header class="page-head">
-              <h2>设置</h2>
-              <p>外观立即生效并记住；默认值仅影响之后新建的隧道</p>
+              <h2 data-i18n="set.head">设置</h2>
+              <p data-i18n="set.lead">外观立即生效并记住；默认值仅影响之后新建的隧道</p>
             </header>
 
             <div class="card">
-              <h3>外观</h3>
+              <h3 data-i18n="set.appearance">外观</h3>
               <div class="set-row">
-                <div class="set-label">主题</div>
-                <div class="pref-seg" id="set-theme" role="group" aria-label="主题">
+                <div class="set-label" data-i18n="set.theme">主题</div>
+                <div class="pref-seg" id="set-theme" role="group" data-i18n-aria="set.theme">
                   <button type="button" data-pref="light"></button>
                   <button type="button" data-pref="system"></button>
                   <button type="button" data-pref="dark"></button>
                 </div>
               </div>
               <div class="set-row">
-                <div class="set-label">字体大小</div>
-                <div class="pref-seg" id="set-font" role="group" aria-label="字体大小">
-                  <button type="button" data-font="sm">小</button>
-                  <button type="button" data-font="md">标准</button>
-                  <button type="button" data-font="lg">大</button>
+                <div class="set-label" data-i18n="set.fontsize">字体大小</div>
+                <div class="pref-seg" id="set-font" role="group" data-i18n-aria="set.fontsize">
+                  <button type="button" data-font="sm" data-i18n="set.fontSm">小</button>
+                  <button type="button" data-font="md" data-i18n="set.fontMd">标准</button>
+                  <button type="button" data-font="lg" data-i18n="set.fontLg">大</button>
                 </div>
               </div>
-              <div class="hint tight">「跟随系统」主题在系统切换明暗时实时跟随；字号整体缩放界面文字。</div>
+              <div class="set-row">
+                <div class="set-label" data-i18n="set.language">语言</div>
+                <div class="pref-seg" id="set-lang" role="group" data-i18n-aria="set.language">
+                  <button type="button" data-lang="zh">中文</button>
+                  <button type="button" data-lang="en">English</button>
+                </div>
+              </div>
+              <div class="hint tight" data-i18n="set.appearHint">「跟随系统」主题在系统切换明暗时实时跟随；字号整体缩放界面文字。</div>
             </div>
 
             <div class="card">
-              <h3>新隧道默认值 <span class="card-sub">重连策略在新建隧道时继承</span></h3>
+              <h3><span data-i18n="set.defaults">新隧道默认值</span> <span class="card-sub" data-i18n="set.defaultsSub">重连策略在新建隧道时继承</span></h3>
               <div class="form-grid">
                 <label class="check-label">
                   <input type="checkbox" id="def-auto" checked />
-                  <span>新隧道自动重连</span>
+                  <span data-i18n="set.defAuto">新隧道自动重连</span>
                 </label>
                 <span></span>
                 <label>
-                  <span>快试次数 (断线先 N×1s 快试)</span>
+                  <span data-i18n="set.defFast">快试次数 (断线先 N×1s 快试)</span>
                   <input id="def-fast" type="number" value="3" min="0" max="10" />
                 </label>
                 <label>
-                  <span>退避封顶 (秒)</span>
+                  <span data-i18n="set.defMax">退避封顶 (秒)</span>
                   <input id="def-max" type="number" value="30" min="1" max="600" />
                 </label>
                 <label class="check-label">
                   <input type="checkbox" id="def-share" checked />
-                  <span>共享 SSH 连接 (同服务器隧道复用一条连接)</span>
+                  <span data-i18n="set.defShare">共享 SSH 连接 (同服务器隧道复用一条连接)</span>
                 </label>
                 <label>
-                  <span>MaxSessions 预算</span>
+                  <span data-i18n="set.defMaxSessions">MaxSessions 预算</span>
                   <input id="def-maxsessions" type="number" value="10" min="2" max="128" />
                 </label>
               </div>
-              <div class="hint tight">
+              <div class="hint tight" data-i18n="set.defaultsHint">
                 共享连接与 MaxSessions 对全部隧道在<b>启动时</b>生效（服务器表单可按服务器覆盖共享开关）；
                 服务器 sshd 的 MaxSessions（默认 10）计入转发通道，预算将满时新隧道自动改用独立连接并在日志告警。
               </div>
               <div class="actions">
-                <button type="button" id="def-save">保存默认值</button>
+                <button type="button" id="def-save" data-i18n="set.saveDefaults">保存默认值</button>
               </div>
             </div>
 
             <div class="card">
-              <h3>开机自启 <span class="card-sub">随系统启动 · 后台运行</span></h3>
+              <h3><span data-i18n="set.autostart">开机自启</span> <span class="card-sub" data-i18n="set.autostartSub">随系统启动 · 后台运行</span></h3>
               <label class="check-label">
                 <input type="checkbox" id="autostart" />
-                <span>系统启动时自动运行 proxyTool</span>
+                <span data-i18n="set.autostartLabel">系统启动时自动运行 proxyTool</span>
               </label>
-              <div class="hint">
+              <div class="hint" data-i18n="set.autostartHint">
                 启动后隐藏到托盘（点击托盘图标显示主窗口，关闭按钮也是收进托盘）。
                 需同时勾选隧道行的「自启」，且档案为<b>未加密私钥</b>认证，隧道才会免交互自动连接；
                 密码认证的隧道需打开窗口手动启动。
@@ -138,99 +145,99 @@
           <!-- 命令生成: 服务器↔服务器隧道命令 (在服务器上执行) -->
           <section class="page" data-page="tools">
             <header class="page-head">
-              <h2>命令生成</h2>
-              <p>填好参数，拼出一条 ssh 命令。把命令拿到<b>服务器 A</b> 上一运行，A 就和目标服务器 <b>B</b> 打通了 —— 你的电脑只负责生成命令，不经手流量。</p>
+              <h2 data-i18n="cmdgen.head">命令生成</h2>
+              <p data-i18n="cmdgen.lead">填好参数，拼出一条 ssh 命令。把命令拿到<b>服务器 A</b> 上一运行，A 就和目标服务器 <b>B</b> 打通了 —— 你的电脑只负责生成命令，不经手流量。</p>
             </header>
 
             <div class="card">
-              <h3>选参数</h3>
+              <h3 data-i18n="cmdgen.params">选参数</h3>
 
               <div class="cg-saved">
-                <span class="cg-saved-label">我的命令</span>
+                <span class="cg-saved-label" data-i18n="cmdgen.mine">我的命令</span>
                 <select id="cg-recipes"></select>
-                <button type="button" id="cg-save">存为命令</button>
-                <button type="button" id="cg-del" class="danger">删除</button>
+                <button type="button" id="cg-save" data-i18n="cmdgen.saveAs">存为命令</button>
+                <button type="button" id="cg-del" class="danger" data-i18n="cmdgen.del">删除</button>
               </div>
 
               <label>
-                <span>SSH 连到哪台服务器 (B)</span>
+                <span data-i18n="cmdgen.targetB">SSH 连到哪台服务器 (B)</span>
                 <select id="cg-profile"></select>
               </label>
               <div class="form-grid">
                 <label>
-                  <span>B 的地址</span>
+                  <span data-i18n="cmdgen.hostB">B 的地址</span>
                   <input id="cg-host" type="text" placeholder="10.0.0.8" />
                 </label>
                 <label>
-                  <span>B 的 SSH 端口</span>
+                  <span data-i18n="cmdgen.portB">B 的 SSH 端口</span>
                   <input id="cg-port" type="number" value="22" min="1" max="65535" />
                 </label>
                 <label>
-                  <span>登录 B 的用户名</span>
+                  <span data-i18n="cmdgen.userB">登录 B 的用户名</span>
                   <input id="cg-user" type="text" placeholder="root" />
                 </label>
               </div>
 
-              <div class="field-title">隧道形态</div>
+              <div class="field-title" data-i18n="cmdgen.kind">隧道形态</div>
               <div class="seg" id="cg-kind">
-                <label class="seg-item"><input type="radio" name="cg-kind" value="local" checked /><span>-L · A 访问 B 那边</span></label>
-                <label class="seg-item"><input type="radio" name="cg-kind" value="reverse" /><span>-R · B 访问 A 这边</span></label>
-                <label class="seg-item"><input type="radio" name="cg-kind" value="dynamic" /><span>-D · A 借 B 当代理</span></label>
+                <label class="seg-item"><input type="radio" name="cg-kind" value="local" checked /><span data-i18n="cmdgen.kindL">-L · A 访问 B 那边</span></label>
+                <label class="seg-item"><input type="radio" name="cg-kind" value="reverse" /><span data-i18n="cmdgen.kindR">-R · B 访问 A 这边</span></label>
+                <label class="seg-item"><input type="radio" name="cg-kind" value="dynamic" /><span data-i18n="cmdgen.kindD">-D · A 借 B 当代理</span></label>
               </div>
 
               <div class="form-grid">
                 <label>
-                  <span>监听端口</span>
+                  <span data-i18n="cmdgen.listen">监听端口</span>
                   <input id="cg-listen" type="number" value="1080" min="1" max="65535" />
                 </label>
                 <span id="cg-target-wrap" class="cg-target">
                   <label>
-                    <span id="cg-tlabel">目标地址</span>
+                    <span id="cg-tlabel" data-i18n="cmdgen.targetHost">目标地址</span>
                     <input id="cg-thost" type="text" value="127.0.0.1" />
                   </label>
                   <label>
-                    <span>目标端口</span>
+                    <span data-i18n="cmdgen.targetPort">目标端口</span>
                     <input id="cg-tport" type="number" value="8080" min="1" max="65535" />
                   </label>
                 </span>
               </div>
               <label class="check-label">
                 <input type="checkbox" id="cg-bind" />
-                <span>监听 0.0.0.0（同一网络里的其他机器也能连）</span>
+                <span data-i18n="cmdgen.bindAll">监听 0.0.0.0（同一网络里的其他机器也能连）</span>
               </label>
             </div>
 
             <div class="card">
-              <h3>生成的命令</h3>
+              <h3 data-i18n="cmdgen.output">生成的命令</h3>
               <div class="flow" id="cg-flow"></div>
               <div class="hint tight" id="cg-hint"></div>
 
               <div class="cmd-block">
                 <div class="cmd-head">
-                  <span class="cmd-title">ssh · 临时（前台运行，断开即停）</span>
-                  <button type="button" class="cmd-copy" data-cmd="ssh">复制</button>
+                  <span class="cmd-title" data-i18n="cmdgen.sshTitle">ssh · 临时（前台运行，断开即停）</span>
+                  <button type="button" class="cmd-copy" data-cmd="ssh" data-i18n="cmdgen.copy">复制</button>
                 </div>
                 <pre class="cmd-text" id="cg-ssh"></pre>
                 <dl class="cmd-notes">
-                  <dt>-N</dt><dd>只做端口转发，不在远端开终端</dd>
-                  <dt>-L / -R / -D</dt><dd>三种转发方向，区别看上面的图</dd>
-                  <dt>ExitOnForwardFailure=yes</dt><dd>端口没建成功就让 ssh 退出，免得看着连上了、实际用不了</dd>
-                  <dt>ServerAliveInterval / CountMax</dt><dd>每 30 秒发一次心跳，连续 3 次没回应就认定断线</dd>
+                  <dt>-N</dt><dd data-i18n="cmdgen.noteN">只做端口转发，不在远端开终端</dd>
+                  <dt>-L / -R / -D</dt><dd data-i18n="cmdgen.noteLRD">三种转发方向，区别看上面的图</dd>
+                  <dt>ExitOnForwardFailure=yes</dt><dd data-i18n="cmdgen.noteExit">端口没建成功就让 ssh 退出，免得看着连上了、实际用不了</dd>
+                  <dt>ServerAliveInterval / CountMax</dt><dd data-i18n="cmdgen.noteAlive">每 30 秒发一次心跳，连续 3 次没回应就认定断线</dd>
                 </dl>
               </div>
               <div class="cmd-block">
                 <div class="cmd-head">
-                  <span class="cmd-title">autossh · 常驻（断线自动重连）</span>
-                  <button type="button" class="cmd-copy" data-cmd="autossh">复制</button>
+                  <span class="cmd-title" data-i18n="cmdgen.autosshTitle">autossh · 常驻（断线自动重连）</span>
+                  <button type="button" class="cmd-copy" data-cmd="autossh" data-i18n="cmdgen.copy">复制</button>
                 </div>
                 <pre class="cmd-text" id="cg-autossh"></pre>
                 <dl class="cmd-notes">
-                  <dt>autossh</dt><dd>ssh 的自动重连版，断了会自己接上（服务器上需先安装）</dd>
-                  <dt>-M 0</dt><dd>关掉 autossh 自带的探测，改用上面的心跳（推荐）</dd>
-                  <dt>AUTOSSH_GATETIME=0</dt><dd>第一次就连不上也不退出，接着重试，适合开机自启</dd>
+                  <dt>autossh</dt><dd data-i18n="cmdgen.noteAutossh">ssh 的自动重连版，断了会自己接上（服务器上需先安装）</dd>
+                  <dt>-M 0</dt><dd data-i18n="cmdgen.noteM0">关掉 autossh 自带的探测，改用上面的心跳（推荐）</dd>
+                  <dt>AUTOSSH_GATETIME=0</dt><dd data-i18n="cmdgen.noteGatetime">第一次就连不上也不退出，接着重试，适合开机自启</dd>
                 </dl>
               </div>
-              <div class="hint tight">
+              <div class="hint tight" data-i18n="cmdgen.trailingHint">
                 第一次连接会提示输密码；想让它长期挂着，先用 <b>ssh-copy-id</b> 配好免密登录更省心。
               </div>
             </div>
@@ -239,93 +246,93 @@
           <!-- 帮助: 定位说明 + 三形态图示 + FAQ -->
           <section class="page" data-page="help">
             <header class="page-head">
-              <h2>帮助</h2>
-              <p>proxyTool 是什么、怎么用</p>
+              <h2 data-i18n="help.head">帮助</h2>
+              <p data-i18n="help.lead">proxyTool 是什么、怎么用</p>
             </header>
 
             <div class="card">
-              <h3>proxyTool 是什么</h3>
-              <p class="lead">
+              <h3 data-i18n="help.what">proxyTool 是什么</h3>
+              <p class="lead" data-i18n="help.whatLead">
                 在你的<b>电脑</b>和<b>远程服务器</b>之间一键建立 SSH 隧道 —— 免命令行、断线自动重连、密码加密保存。
               </p>
               <div class="steps">
-                <div class="step"><span class="step-n">1</span><div><strong>新建服务器</strong><span>填地址和账号，像 SSH 客户端一样</span></div></div>
-                <div class="step"><span class="step-n">2</span><div><strong>新建隧道</strong><span>选一个场景预设（如 VPN 共享），参数自动填好</span></div></div>
-                <div class="step"><span class="step-n">3</span><div><strong>点 ▶ 启动</strong><span>服务器块上的播放键一次启动全部隧道</span></div></div>
+                <div class="step"><span class="step-n">1</span><div data-i18n="help.step1"><strong>新建服务器</strong><span>填地址和账号，像 SSH 客户端一样</span></div></div>
+                <div class="step"><span class="step-n">2</span><div data-i18n="help.step2"><strong>新建隧道</strong><span>选一个场景预设（如 VPN 共享），参数自动填好</span></div></div>
+                <div class="step"><span class="step-n">3</span><div data-i18n="help.step3"><strong>点 ▶ 启动</strong><span>服务器块上的播放键一次启动全部隧道</span></div></div>
               </div>
-              <button type="button" id="help-new-server" class="primary">新建第一台服务器</button>
+              <button type="button" id="help-new-server" class="primary" data-i18n="help.cta">新建第一台服务器</button>
             </div>
 
             <div class="card">
-              <h3>三种隧道形态</h3>
+              <h3 data-i18n="help.kinds">三种隧道形态</h3>
 
               <div class="kind-doc">
-                <div class="kind-doc-head"><span class="ktag">反向 -R</span><strong>服务器 → 你的电脑</strong></div>
-                <p>在服务器上开端口，流量回到你电脑。典型：<b>让服务器借你 PC 的 VPN 出网</b>（服务器 127.0.0.1:1080 → 你电脑的 SOCKS 代理），或让服务器访问你电脑上的服务。</p>
+                <div class="kind-doc-head" data-i18n="help.kindRHead"><span class="ktag">反向 -R</span><strong>服务器 → 你的电脑</strong></div>
+                <p data-i18n="help.kindRp">在服务器上开端口，流量回到你电脑。典型：<b>让服务器借你 PC 的 VPN 出网</b>（服务器 127.0.0.1:1080 → 你电脑的 SOCKS 代理），或让服务器访问你电脑上的服务。</p>
               </div>
               <div class="kind-doc">
-                <div class="kind-doc-head"><span class="ktag">本地 -L</span><strong>你的电脑 → 服务器</strong></div>
-                <p>在你电脑上开端口，访问<b>服务器侧或其内网</b>的服务。典型：本机 3307 → 服务器内网的 MySQL。</p>
+                <div class="kind-doc-head" data-i18n="help.kindLHead"><span class="ktag">本地 -L</span><strong>你的电脑 → 服务器</strong></div>
+                <p data-i18n="help.kindLp">在你电脑上开端口，访问<b>服务器侧或其内网</b>的服务。典型：本机 3307 → 服务器内网的 MySQL。</p>
               </div>
               <div class="kind-doc">
-                <div class="kind-doc-head"><span class="ktag">动态 -D</span><strong>你的电脑 → 服务器（SOCKS5）</strong></div>
-                <p>在你电脑上开一个 SOCKS5 代理，任意流量<b>经服务器代连</b> —— 浏览器挂上就能访问服务器内网。</p>
+                <div class="kind-doc-head" data-i18n="help.kindDHead"><span class="ktag">动态 -D</span><strong>你的电脑 → 服务器（SOCKS5）</strong></div>
+                <p data-i18n="help.kindDp">在你电脑上开一个 SOCKS5 代理，任意流量<b>经服务器代连</b> —— 浏览器挂上就能访问服务器内网。</p>
               </div>
-              <div class="hint tight">「命令生成」页是第四种场景：服务器 ↔ 服务器，命令拷到服务器上执行，不经过本机。</div>
+              <div class="hint tight" data-i18n="help.kindsHint">「命令生成」页是第四种场景：服务器 ↔ 服务器，命令拷到服务器上执行，不经过本机。</div>
             </div>
 
             <div class="card">
-              <h3>什么情况用哪种？</h3>
-              <p class="card-sub">三个常见例子</p>
+              <h3 data-i18n="help.cases">什么情况用哪种？</h3>
+              <p class="card-sub" data-i18n="help.casesSub">三个常见例子</p>
 
               <div class="case">
                 <div class="case-body">
-                  <strong>服务器上不了外网，你的电脑可以</strong>
-                  <p>服务器要装软件、拉代码，却只有你的电脑能上外网。把你电脑上的代理「借」给服务器用——本软件的「VPN 共享」预设干的就是这件事。</p>
+                  <strong data-i18n="help.case1T">服务器上不了外网，你的电脑可以</strong>
+                  <p data-i18n="help.case1P">服务器要装软件、拉代码，却只有你的电脑能上外网。把你电脑上的代理「借」给服务器用——本软件的「VPN 共享」预设干的就是这件事。</p>
                 </div>
-                <span class="ktag">反向 -R</span>
+                <span class="ktag" data-i18n="help.ktagR">反向 -R</span>
               </div>
               <div class="case">
                 <div class="case-body">
-                  <strong>人在外面，想访问公司内网的服务</strong>
-                  <p>数据库、管理后台只对公司内网开放，你的电脑连不进去。在本机开个小端口，流量经服务器带你进内网。</p>
+                  <strong data-i18n="help.case2T">人在外面，想访问公司内网的服务</strong>
+                  <p data-i18n="help.case2P">数据库、管理后台只对公司内网开放，你的电脑连不进去。在本机开个小端口，流量经服务器带你进内网。</p>
                 </div>
-                <span class="ktag">本地 -L</span>
+                <span class="ktag" data-i18n="help.ktagL">本地 -L</span>
               </div>
               <div class="case">
                 <div class="case-body">
-                  <strong>内网服务一大把，一个个开隧道太麻烦</strong>
-                  <p>一条命令把服务器变成你电脑的出口：浏览器或终端挂上 SOCKS5 代理，就像人坐在服务器跟前。</p>
+                  <strong data-i18n="help.case3T">内网服务一大把，一个个开隧道太麻烦</strong>
+                  <p data-i18n="help.case3P">一条命令把服务器变成你电脑的出口：浏览器或终端挂上 SOCKS5 代理，就像人坐在服务器跟前。</p>
                 </div>
-                <span class="ktag">动态 -D</span>
+                <span class="ktag" data-i18n="help.ktagD">动态 -D</span>
               </div>
             </div>
 
             <div class="card">
-              <h3>常见问题</h3>
+              <h3 data-i18n="help.faq">常见问题</h3>
               <details>
-                <summary>密码会被保存吗？</summary>
-                <p>会。首次启动输入后自动记住：以 <b>AES-256-GCM 密文</b>保存在本机（secrets.enc），重启与开机自启都不用再输；密码错误会自动作废，服务器详情页也能随时清除。</p>
+                <summary data-i18n="faq1Q">密码会被保存吗？</summary>
+                <p data-i18n="faq1A">会。首次启动输入后自动记住：以 <b>AES-256-GCM 密文</b>保存在本机（secrets.enc），重启与开机自启都不用再输；密码错误会自动作废，服务器详情页也能随时清除。</p>
               </details>
               <details>
-                <summary>首次连接弹出的「指纹」是什么？</summary>
-                <p>首次连接会记住服务器公钥指纹（TOFU），之后指纹一旦变化就拒绝连接并提示 —— 防中间人攻击。服务器详情页可查看 / 复制 / 清除。</p>
+                <summary data-i18n="faq2Q">首次连接弹出的「指纹」是什么？</summary>
+                <p data-i18n="faq2A">首次连接会记住服务器公钥指纹（TOFU），之后指纹一旦变化就拒绝连接并提示 —— 防中间人攻击。服务器详情页可查看 / 复制 / 清除。</p>
               </details>
               <details>
-                <summary>服务器块上的 ▶ 一键启动做了什么？</summary>
-                <p>启动该服务器全部勾了「自启」的隧道；密码认证首次会要一次密码，之后会话内免输。</p>
+                <summary data-i18n="faq3Q">服务器块上的 ▶ 一键启动做了什么？</summary>
+                <p data-i18n="faq3A">启动该服务器全部勾了「自启」的隧道；密码认证首次会要一次密码，之后会话内免输。</p>
               </details>
               <details>
-                <summary>共享 SSH 连接是什么？</summary>
-                <p>同一服务器的多条隧道复用一条 SSH 连接（N 条隧道只认证一次）；受服务器 MaxSessions 限制，将满时自动改用独立连接。</p>
+                <summary data-i18n="faq4Q">共享 SSH 连接是什么？</summary>
+                <p data-i18n="faq4A">同一服务器的多条隧道复用一条 SSH 连接（N 条隧道只认证一次）；受服务器 MaxSessions 限制，将满时自动改用独立连接。</p>
               </details>
               <details>
-                <summary>点关闭按钮软件退出了吗？</summary>
-                <p>没有 —— 收进系统托盘继续运行，隧道不断；托盘图标右键菜单里才是真正退出。</p>
+                <summary data-i18n="faq5Q">点关闭按钮软件退出了吗？</summary>
+                <p data-i18n="faq5A">没有 —— 收进系统托盘继续运行，隧道不断；托盘图标右键菜单里才是真正退出。</p>
               </details>
               <details>
-                <summary>隧道断了会自动重连吗？</summary>
-                <p>会。快试 3 次后指数退避（最长 30 秒），连接保持 3 秒以上退避清零；行菜单里有「立即重试」。</p>
+                <summary data-i18n="faq6Q">隧道断了会自动重连吗？</summary>
+                <p data-i18n="faq6A">会。快试 3 次后指数退避（最长 30 秒），连接保持 3 秒以上退避清零；行菜单里有「立即重试」。</p>
               </details>
             </div>
           </section>
@@ -336,8 +343,8 @@
             <!-- 空态 -->
             <div id="detail-empty" class="dp-view">
               <div class="dp-empty">
-                <p>选择左侧服务器查看详情</p>
-                <p class="hint">每台服务器可建多条<b>本机 ↔ 该服务器</b>的隧道；块上的<b>播放键</b>一键全部启动，没有服务器就先「＋ 新建」。</p>
+                <p data-i18n="detail.empty1">选择左侧服务器查看详情</p>
+                <p class="hint" data-i18n="detail.empty2">每台服务器可建多条<b>本机 ↔ 该服务器</b>的隧道；块上的<b>播放键</b>一键全部启动，没有服务器就先「＋ 新建」。</p>
               </div>
             </div>
 
@@ -346,8 +353,8 @@
               <div id="pd-head"></div>
               <div id="pd-pwbar" class="pw-bar hidden"></div>
               <div class="list-head">
-                <span class="field-title">隧道</span>
-                <button type="button" id="pd-new-tunnel" class="primary">新建隧道</button>
+                <span class="field-title" data-i18n="detail.tunnels">隧道</span>
+                <button type="button" id="pd-new-tunnel" class="primary" data-i18n="detail.newTunnel">新建隧道</button>
               </div>
               <div id="pd-tunnels"></div>
               <div id="pd-secret"></div>
@@ -357,61 +364,61 @@
             <!-- 服务器表单 (新建/编辑) -->
             <form id="server-form" class="dp-view hidden">
               <div class="dp-head">
-                <button type="button" id="sf-back" class="icon-btn" title="返回" aria-label="返回"></button>
-                <h3 id="sf-title">新建服务器</h3>
+                <button type="button" id="sf-back" class="icon-btn" data-i18n-title="sf.back" data-i18n-aria="sf.back"></button>
+                <h3 id="sf-title" data-i18n="sf.titleNew">新建服务器</h3>
               </div>
               <input type="hidden" id="profile-id" />
               <label>
-                <span>名称</span>
-                <input id="profile-name" type="text" placeholder="腾讯云-测试机" />
+                <span data-i18n="sf.name">名称</span>
+                <input id="profile-name" type="text" data-i18n-ph="sf.namePh" placeholder="腾讯云-测试机" />
               </label>
               <label>
-                <span>服务器地址</span>
+                <span data-i18n="sf.host">服务器地址</span>
                 <input id="profile-host" type="text" placeholder="203.0.113.20" />
               </label>
               <div class="form-grid">
                 <label>
-                  <span>SSH 端口</span>
+                  <span data-i18n="sf.port">SSH 端口</span>
                   <input id="profile-port" type="number" value="22" min="1" max="65535" />
                 </label>
                 <label>
-                  <span>用户名</span>
+                  <span data-i18n="sf.user">用户名</span>
                   <input id="profile-user" type="text" placeholder="tester" />
                 </label>
               </div>
               <label>
-                <span>私钥路径 (选填)</span>
+                <span data-i18n="sf.key">私钥路径 (选填)</span>
                 <input id="profile-key" type="text" placeholder="C:\Users\you\.ssh\id_ed25519" />
               </label>
-              <div class="hint tight">
+              <div class="hint tight" data-i18n="sf.keyHint">
                 填写私钥路径则用密钥认证 (公钥需已加入服务器 authorized_keys)，密码框此时充当密钥口令；留空用密码认证。
               </div>
               <label>
-                <span>共享 SSH 连接</span>
+                <span data-i18n="sf.share">共享 SSH 连接</span>
                 <select id="profile-share">
-                  <option value="">跟随默认值</option>
-                  <option value="on">共享 — 同服务器隧道复用一条连接</option>
-                  <option value="off">独立 — 每条隧道单独连接</option>
+                  <option value="" data-i18n="sf.shareFollow">跟随默认值</option>
+                  <option value="on" data-i18n="sf.shareOn">共享 — 同服务器隧道复用一条连接</option>
+                  <option value="off" data-i18n="sf.shareOff">独立 — 每条隧道单独连接</option>
                 </select>
               </label>
               <div class="actions">
-                <button type="submit" class="primary">保存</button>
-                <button type="button" id="sf-cancel">取消</button>
+                <button type="submit" class="primary" data-i18n="common.save">保存</button>
+                <button type="button" id="sf-cancel" data-i18n="common.cancel">取消</button>
               </div>
             </form>
 
             <!-- 新建隧道: 选场景 (预设 + 自定义 + 我的场景) -->
             <div id="scenario-pick" class="dp-view hidden">
               <div class="dp-head">
-                <button type="button" id="sp-back" class="icon-btn" title="返回" aria-label="返回"></button>
-                <h3 id="sp-title">新建隧道 — 选择场景</h3>
+                <button type="button" id="sp-back" class="icon-btn" data-i18n-title="sp.back" data-i18n-aria="sp.back"></button>
+                <h3 id="sp-title" data-i18n="sp.title">新建隧道 — 选择场景</h3>
               </div>
-              <div class="field-title">场景预设</div>
+              <div class="field-title" data-i18n="sp.presets">场景预设</div>
               <div id="preset-cards" class="preset-grid one"></div>
               <div id="my-scenarios-wrap">
-                <div class="field-title">我的场景</div>
+                <div class="field-title" data-i18n="sp.mine">我的场景</div>
                 <div id="scenario-cards" class="preset-grid one"></div>
-                <div id="scenario-empty-hint" class="hint tight">
+                <div id="scenario-empty-hint" class="hint tight" data-i18n="sp.mineHint">
                   还没有保存的场景 —— 建隧道时勾选「存为我的场景」，或隧道行点「存为场景」。
                 </div>
               </div>
@@ -420,27 +427,27 @@
             <!-- 新建隧道: 表单 (kind/backend 驱动) -->
             <form id="tunnel-form" class="dp-view hidden">
               <div class="dp-head">
-                <button type="button" id="tf-back" class="icon-btn" title="重选场景" aria-label="重选场景"></button>
-                <h3 id="tf-title">新建隧道</h3>
+                <button type="button" id="tf-back" class="icon-btn" data-i18n-title="tf.back" data-i18n-aria="tf.back"></button>
+                <h3 id="tf-title" data-i18n="tf.title">新建隧道</h3>
               </div>
 
               <label>
-                <span>名称</span>
-                <input id="wz-name" type="text" placeholder="隧道名称" />
+                <span data-i18n="tf.name">名称</span>
+                <input id="wz-name" type="text" data-i18n-ph="tf.namePh" placeholder="隧道名称" />
               </label>
 
-              <div class="field-title">隧道形态</div>
+              <div class="field-title" data-i18n="tf.kind">隧道形态</div>
               <div id="tf-kind" class="seg">
-                <label class="seg-item"><input type="radio" name="tf-kind" value="reverse" /><span>反向 -R</span></label>
-                <label class="seg-item"><input type="radio" name="tf-kind" value="local" /><span>本地 -L</span></label>
-                <label class="seg-item"><input type="radio" name="tf-kind" value="dynamic" /><span>动态 -D</span></label>
+                <label class="seg-item"><input type="radio" name="tf-kind" value="reverse" /><span data-i18n="tf.kindR">反向 -R</span></label>
+                <label class="seg-item"><input type="radio" name="tf-kind" value="local" /><span data-i18n="tf.kindL">本地 -L</span></label>
+                <label class="seg-item"><input type="radio" name="tf-kind" value="dynamic" /><span data-i18n="tf.kindD">动态 -D</span></label>
               </div>
 
               <div id="tf-backend-wrap" class="hidden">
-                <div class="field-title">本机落地 (反向隧道的流量去向)</div>
+                <div class="field-title" data-i18n="tf.backend">本机落地 (反向隧道的流量去向)</div>
                 <div class="seg">
-                  <label class="seg-item"><input type="radio" name="tf-backend" value="socksAuto" /><span>本机 SOCKS (VPN)</span></label>
-                  <label class="seg-item"><input type="radio" name="tf-backend" value="tcp" /><span>固定地址</span></label>
+                  <label class="seg-item"><input type="radio" name="tf-backend" value="socksAuto" /><span data-i18n="tf.backendSocks">本机 SOCKS (VPN)</span></label>
+                  <label class="seg-item"><input type="radio" name="tf-backend" value="tcp" /><span data-i18n="tf.backendTcp">固定地址</span></label>
                 </div>
               </div>
 
@@ -449,24 +456,24 @@
 
               <div class="form-grid">
                 <label>
-                  <span id="wz-password-label">密码 (连接成功后加密保存到本机)</span>
+                  <span id="wz-password-label" data-i18n="tf.password">密码 (连接成功后加密保存到本机)</span>
                   <input id="wz-password" type="password" autocomplete="off" />
                 </label>
                 <label class="check-label">
                   <input type="checkbox" id="wz-auto" checked />
-                  <span>自动重连</span>
+                  <span data-i18n="tf.auto">自动重连</span>
                 </label>
               </div>
 
               <label class="check-label">
                 <input type="checkbox" id="wz-save-scenario" />
-                <span>存为我的场景 (下次新建直接复用)</span>
+                <span data-i18n="tf.saveScenario">存为我的场景 (下次新建直接复用)</span>
               </label>
-              <input id="wz-scenario-name" type="text" placeholder="场景名称 (默认同隧道名)" class="hidden" />
+              <input id="wz-scenario-name" type="text" data-i18n-ph="tf.scenarioPh" placeholder="场景名称 (默认同隧道名)" class="hidden" />
 
               <div class="actions">
-                <button type="button" id="wz-save">仅保存</button>
-                <button type="submit" class="primary">保存并启动</button>
+                <button type="button" id="wz-save" data-i18n="tf.saveOnly">仅保存</button>
+                <button type="submit" class="primary" data-i18n="tf.saveStart">保存并启动</button>
               </div>
               <div class="hint" id="wz-error"></div>
             </form>

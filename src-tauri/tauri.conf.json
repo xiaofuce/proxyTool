@@ -10,23 +10,28 @@
     "frontendDist": "../dist"
   },
   "app": {
-    "withGlobalTauri": true,
+    "withGlobalTauri": false,
     "windows": [
       {
         "title": "proxyTool",
         "width": 1100,
         "height": 720,
         "minWidth": 900,
-        "minHeight": 580
+        "minHeight": 580,
+        "additionalBrowserArgs": "--enable-features=OverlayScrollbar"
       }
     ],
     "security": {
-      "csp": null
+      "csp": "default-src 'self'; connect-src 'self' ipc: http://ipc.localhost; script-src 'self' 'sha256-E3HpvO8DWDCdJfzUzmoWjB5i4w3GrEZAEJ9z8YlHhgg='; style-src 'self' 'unsafe-inline'; img-src 'self' data:",
+      "devCsp": "default-src 'self'; connect-src 'self' ipc: http://ipc.localhost ws://localhost:1420; script-src 'self' 'sha256-E3HpvO8DWDCdJfzUzmoWjB5i4w3GrEZAEJ9z8YlHhgg='; style-src 'self' 'unsafe-inline'; img-src 'self' data:"
     }
   },
   "bundle": {
     "active": true,
     "targets": "all",
+    "category": "Utilities",
+    "shortDescription": "本机 ↔ 远程服务器 SSH 隧道",
+    "longDescription": "一键建立本地到远程服务器的 SSH 隧道：反向共享本机代理、本地/动态访问服务器内网，断线自动重连，凭据 AES 加密保存。",
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",

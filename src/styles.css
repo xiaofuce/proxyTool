@@ -106,31 +106,18 @@ body {
   overflow: hidden; /* 窗口即视口, 滚动只在列内 (hosts-col / content / log) */
 }
 
-/* 细滚动条 (WebView2 = Chromium): 自动隐藏——平时 thumb 透明 (轨道仍占 8px
-   防内容回流), 滚动中 (.scrolling, JS 加) 或悬停容器时显色可拖 */
+/* 细滚动条 (WebView2 = Chromium): 弱化存在感, 不再顶出系统粗条 */
 ::-webkit-scrollbar {
   width: 8px;
   height: 8px;
 }
 
 ::-webkit-scrollbar-thumb {
-  background: transparent;
+  background: var(--border-strong);
   border-radius: 4px;
 }
 
-*:hover::-webkit-scrollbar-thumb {
-  background: var(--border-strong);
-}
-
-*:hover::-webkit-scrollbar-thumb:hover {
-  background: var(--muted);
-}
-
-.scrolling::-webkit-scrollbar-thumb {
-  background: var(--border-strong);
-}
-
-.scrolling::-webkit-scrollbar-thumb:hover {
+::-webkit-scrollbar-thumb:hover {
   background: var(--muted);
 }
 

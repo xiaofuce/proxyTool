@@ -30,6 +30,7 @@ use crate::tunnel::{TunnelConfig, TunnelSession};
 ///   (兼容模式用同样的连接, 重试必然同样失败; 错误密码不做无谓二次连接);
 /// - `ForwardRejected/ChannelOpen/Protocol`: 转发不可用 (sshd 拒绝/地址族/端口
 ///   被占) 或探测确认被注入 —— **回退兼容模式**。
+///
 /// 成功后污染仍可能在运行期暴露 (探测漏检), 由 handler 首字节检查置位
 /// corrupted 标志, 引擎监控后重建为兼容模式。
 pub async fn establish(
@@ -96,6 +97,21 @@ pub(crate) async fn establish_forward(
     }
 }
 
+/// tcpip_forward 回告端口 → 实际监听端口的判定。
+/// **非零请求收到 0 回告 = 坏回复** (注入 sshd 实测行为: sshd 仍按请求端口
+/// 绑定并转发, forwarded 通道照常到达, 只是回告不可信) —— 以请求端口为准。
+/// 否则整条链被带偏: 路由被「改派」到 0、探测连 0 端口必失败、回退后
+/// cancel(0) 取消不掉真实监听, 残留 sshd 监听还挡住兼容助手 bind。
+/// 其余按回告: 0 请求的动态分配 / 真实改派 / 原样回告; 超 u16 视为协议错误。
+fn resolve_bound_port(reply: u32, requested: u16) -> Result<u16, TunnelError> {
+    if reply == 0 && requested != 0 {
+        Ok(requested)
+    } else {
+        u16::try_from(reply)
+            .map_err(|_| TunnelError::Protocol(format!("服务器返回异常端口: {reply}")))
+    }
+}
+
 /// 失败时的清理线索: 转发已生效到哪个端口 (探测失败的场景)
 struct ForwardFail {
     error: TunnelError,
@@ -123,9 +139,11 @@ async fn forward_and_probe(
         },
         bound_port: None,
     })?;
-    let bound_port: u16 = actual_port.try_into().map_err(|_| ForwardFail {
-        error: TunnelError::Protocol(format!("服务器返回异常端口: {actual_port}")),
-        bound_port: None,
+    let bound_port: u16 = resolve_bound_port(actual_port, cfg.remote_port as u16).map_err(|e| {
+        ForwardFail {
+            error: e,
+            bound_port: None,
+        }
     })?;
 
     // 端口 0 (或服务器改派): 按实际端口注册路由, 摘除预注册的请求端口键
@@ -173,15 +191,30 @@ async fn forward_and_probe(
             error: TunnelError::Protocol(format!("执行探测命令失败: {e}")),
             bound_port: Some(bound_port),
         })?;
-    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    // 事件驱动收探测输出 (R8: 原固定 sleep 2s 每建连/重连都白等)。读到判定
+    // 标记 (PROBE_OK / PROBE_FAIL) 或通道关闭 (命令退出) 即止, 5s 超时兜底
+    // 挂起的连接。判定只信标记 —— 命令单次最多出一个, 出现即终局。
+    // (注入判定不受影响: 0x00 首字节由 bridge_forwarded 独立置位 corrupted,
+    // 探测通道读侧提前结束只会让 establish 的即时检查退化为 ~500ms 运行期
+    // 轮询兜底, 终态模式不变, 见 tunnel.rs 运行期重建)
     let mut probe_out = Vec::new();
     let mut stream = probe.into_stream();
-    let _ = tokio::time::timeout(
-        std::time::Duration::from_secs(5),
-        stream.read_to_end(&mut probe_out),
-    )
-    .await;
-    let out = String::from_utf8_lossy(&probe_out);
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+    let out = loop {
+        let mut chunk = [0u8; 64];
+        match tokio::time::timeout_at(deadline, stream.read(&mut chunk)).await {
+            Ok(Ok(0)) => break String::from_utf8_lossy(&probe_out).into_owned(), // EOF: 命令已退出
+            Ok(Ok(n)) => {
+                probe_out.extend_from_slice(&chunk[..n]);
+                let text = String::from_utf8_lossy(&probe_out);
+                if text.contains("PROBE_OK") || text.contains("PROBE_FAIL") {
+                    break text.into_owned();
+                }
+            }
+            // 读错 / 超时: 连接挂起, 兜底按失败处理 (沿用旧 read_to_end 语义)
+            Ok(Err(_)) | Err(_) => break String::from_utf8_lossy(&probe_out).into_owned(),
+        }
+    };
     (logger)(&format!("端口探测结果: {}", out.trim()));
     if !out.contains("PROBE_OK") {
         return Err(ForwardFail {
@@ -193,4 +226,28 @@ async fn forward_and_probe(
         });
     }
     Ok(bound_port)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::resolve_bound_port;
+
+    // 回告端口判定契约 (注入 sshd 的 0 回告是实测行为, e2e 全链验证;
+    // 这里锁住纯函数分支, 防回归到「盲信回告」)
+    #[test]
+    fn nonzero_request_zero_reply_falls_back_to_requested() {
+        assert_eq!(resolve_bound_port(0, 1081).unwrap(), 1081);
+    }
+
+    #[test]
+    fn normal_replies_pass_through() {
+        assert_eq!(resolve_bound_port(1081, 1081).unwrap(), 1081); // 原样
+        assert_eq!(resolve_bound_port(2222, 1081).unwrap(), 2222); // 真实改派
+        assert_eq!(resolve_bound_port(54321, 0).unwrap(), 54321); // 动态分配
+    }
+
+    #[test]
+    fn oversized_reply_is_protocol_error() {
+        assert!(resolve_bound_port(70_000, 1081).is_err());
+    }
 }

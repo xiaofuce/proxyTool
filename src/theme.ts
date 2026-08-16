@@ -3,6 +3,7 @@
 // html[data-font] (styles.css 色板与 --fs 阶梯的选择器)。
 // 防闪烁的初值解析在 index.html 内联脚本 (样式表加载前), 这里只负责切换与控件。
 import { icon, type IconName } from "./icons";
+import { t, onLangChange, type I18nKey } from "./i18n";
 
 export type ThemePref = "light" | "dark" | "system";
 export type FontPref = "sm" | "md" | "lg";
@@ -42,20 +43,26 @@ function syncSeg(seg: HTMLElement, attr: string, cur: string): void {
 
 /** 挂载设置页的两个分段控件 (主题 / 字体大小), 并监听系统主题变化实时跟随 */
 export function initAppearance(): void {
-  // 主题三态: 图标 + 文案
+  // 主题三态: 图标 + 文案 (label 键随档位, 切语言时经 onLangChange 重写)
   const tseg = document.getElementById("set-theme");
   if (tseg) {
-    const ITEMS: { pref: ThemePref; icon: IconName; label: string }[] = [
-      { pref: "light", icon: "sun", label: "浅色" },
-      { pref: "system", icon: "monitor", label: "跟随系统" },
-      { pref: "dark", icon: "moon", label: "深色" },
+    const ITEMS: { pref: ThemePref; icon: IconName; label: I18nKey }[] = [
+      { pref: "light", icon: "sun", label: "theme.light" },
+      { pref: "system", icon: "monitor", label: "theme.system" },
+      { pref: "dark", icon: "moon", label: "theme.dark" },
     ];
-    for (const { pref, icon: ic, label } of ITEMS) {
-      const b = tseg.querySelector<HTMLButtonElement>(`[data-pref="${pref}"]`);
-      if (!b) continue;
-      b.innerHTML = `${icon(ic, 14)}<span class="btn-label"></span>`;
-      b.querySelector(".btn-label")!.textContent = label;
-      b.addEventListener("click", () => setThemePref(pref));
+    const renderLabels = () => {
+      for (const { pref, icon: ic, label } of ITEMS) {
+        const b = tseg.querySelector<HTMLButtonElement>(`[data-pref="${pref}"]`);
+        if (!b) continue;
+        if (!b.innerHTML.includes("btn-label")) b.innerHTML = `${icon(ic, 14)}<span class="btn-label"></span>`;
+        b.querySelector(".btn-label")!.textContent = t(label);
+      }
+    };
+    renderLabels();
+    onLangChange(renderLabels);
+    for (const { pref } of ITEMS) {
+      tseg.querySelector<HTMLButtonElement>(`[data-pref="${pref}"]`)?.addEventListener("click", () => setThemePref(pref));
     }
     const cur = () =>
       (document.documentElement.dataset.themePref as ThemePref | undefined) ?? "system";

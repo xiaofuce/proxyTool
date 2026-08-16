@@ -2,6 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { icon, type IconName } from "./icons";
 import { initAppearance } from "./theme";
+import { t, getLang, setLang, onLangChange, applyI18nStatic, hasKey, type I18nKey, type Lang } from "./i18n";
 import {
   toast,
   toastRich,
@@ -107,11 +108,19 @@ function escapeHtml(s: string): string {
 type KindTag = "reverse" | "local" | "dynamic";
 
 function kindTag(k: Kind): KindTag {
-  return Object.keys(k)[0] as KindTag;
+  // 结构判定而非 Object.keys 序 (serde externally-tagged 键唯一, 但序不可依赖)
+  if ("reverse" in k) return "reverse";
+  if ("local" in k) return "local";
+  return "dynamic";
 }
 
 function kindLabel(k: Kind): string {
-  return { reverse: "反向", local: "本地", dynamic: "动态" }[kindTag(k)];
+  const map: Record<KindTag, I18nKey> = {
+    reverse: "kind.reverse",
+    local: "kind.local",
+    dynamic: "kind.dynamic",
+  };
+  return t(map[kindTag(k)]);
 }
 
 /** 隧道表单里的形态值 ↔ serde tag */
@@ -122,13 +131,16 @@ function formKindOf(k: Kind): FormKind {
 }
 
 /** 五态五语义: 未启动(中性)/连接中(蓝)/已连接(绿)/重连中(琥珀)/连接失败(红) */
-const STATUS_TEXT: Record<string, string> = {
-  connecting: "连接中",
-  connected: "已连接",
-  reconnecting: "重连中",
-  disconnected: "未启动",
-  error: "连接失败",
-};
+function statusText(state: string): string {
+  const map: Record<string, I18nKey> = {
+    connecting: "st.connecting",
+    connected: "st.connected",
+    reconnecting: "st.reconnecting",
+    disconnected: "st.disconnected",
+    error: "st.error",
+  };
+  return map[state] ? t(map[state]) : state;
+}
 
 const ACTIVE_STATES = ["connected", "connecting", "reconnecting"];
 
@@ -155,8 +167,11 @@ const expanded = new Set<string>();
 const connectedSince = new Map<string, number>();
 /** tunnelId -> 行内密码输入草稿 (整表重绘回填, 防正在输入的密码丢失) */
 const pwDrafts = new Map<string, string>();
+/** 密码输入焦点归属 (R8): 视图切换销毁行后重建时只恢复原活动行的焦点, 不抢新行焦点 */
+let lastPwFocusedId: string | null = null;
 /** tunnelId -> 行内 DOM 引用 (事件增量更新, 不整表重绘) */
 interface RowRefs {
+  card: HTMLElement; // 行根元素 (增量移除用)
   status: HTMLSpanElement;
   portChip: HTMLSpanElement;
   uptime: HTMLSpanElement;
@@ -177,8 +192,14 @@ let selectedProfileId: string | null = null;
 /** 右面板视图状态 */
 type DetailView = "empty" | "detail" | "server-form" | "scenario-pick" | "tunnel-form";
 let detailView: DetailView = "empty";
-/** 一键启动等待密码时暂存的目标隧道 */
-let pdPwTargets: TunnelDto[] = [];
+/** 一键启动密码条 (R8 #2): 重绘不销毁输入 —— draft/focused 持态, 启动完成才清 */
+interface PdPwState {
+  profileId: string;
+  targets: TunnelDto[];
+  draft: string;
+  focused: boolean;
+}
+let pdPwState: PdPwState | null = null;
 /** 隧道表单上下文 (来自预设/我的场景/自定义的模板) */
 let wzSpec: TunnelSpec | null = null;
 
@@ -244,28 +265,34 @@ function showPage(name: string) {
 navItems.forEach((b) => b.addEventListener("click", () => showPage(b.dataset.page!)));
 
 // ---------- 隧道行渲染 (服务器详情页) ----------
-function summary(t: TunnelDto): string {
-  const k = t.kind;
+function summary(dt: TunnelDto): string {
+  const k = dt.kind;
   if ("reverse" in k) {
     const port = k.reverse.port;
-    const remote = port === 0 ? "服务器动态端口" : `服务器 127.0.0.1:${port}`;
+    const remote =
+      port === 0 ? t("sm.remoteDyn") : t("sm.remotePort", { port });
     const local =
-      "socksAuto" in t.backend
-        ? "本机 VPN SOCKS (自动探测)"
-        : `本机 ${t.backend.tcp[0]}:${t.backend.tcp[1]}`;
+      "socksAuto" in dt.backend
+        ? t("sm.localSocks")
+        : t("sm.localTcp", { host: dt.backend.tcp[0], port: dt.backend.tcp[1] });
     return `${remote} ← ${local}`;
   }
   if ("local" in k) {
-    return `本机 ${k.local.bind}:${k.local.port} → ${k.local.targetHost}:${k.local.targetPort}`;
+    return t("sm.localFwd", {
+      bind: k.local.bind,
+      port: k.local.port,
+      host: k.local.targetHost,
+      tport: k.local.targetPort,
+    });
   }
-  return `本机 SOCKS5 ${k.dynamic.bind}:${k.dynamic.port} → 服务器代连内网`;
+  return t("sm.dynFwd", { bind: k.dynamic.bind, port: k.dynamic.port });
 }
 
 /** 摘要行文案: summary · host (host 比别名有增量) */
-function subLine(t: TunnelDto): string {
-  const profile = profiles.find((p) => p.id === t.profileId);
-  if (!profile) return `档案缺失 — ${summary(t)}`;
-  return `${summary(t)} · ${profile.host}`;
+function subLine(dt: TunnelDto): string {
+  const profile = profiles.find((p) => p.id === dt.profileId);
+  if (!profile) return t("sm.noProfile", { s: summary(dt) });
+  return `${summary(dt)} · ${profile.host}`;
 }
 
 /** vpn_share 形态 (反向 + SOCKS 落地): 显示「验证外网 / 部署 proxy」动作 */
@@ -281,36 +308,36 @@ function needPassword(t: TunnelDto): boolean {
 /** 运行时长: <60 秒 / N分N秒 / N时N分 / N天N时 */
 function fmtUptime(ms: number): string {
   const s = Math.floor(ms / 1000);
-  if (s < 60) return `${s}秒`;
+  if (s < 60) return t("up.s", { s });
   const m = Math.floor(s / 60);
-  if (m < 60) return `${m}分${s % 60}秒`;
+  if (m < 60) return t("up.ms", { m, s: s % 60 });
   const h = Math.floor(m / 60);
-  if (h < 24) return `${h}时${m % 60}分`;
-  return `${Math.floor(h / 24)}天${h % 24}时`;
+  if (h < 24) return t("up.hm", { h, m: m % 60 });
+  return t("up.dh", { d: Math.floor(h / 24), h: h % 24 });
 }
 
 /** 端口 chip: 反向 = 服务器端口 (0=动态分配弱 chip, 回填后 :port 绿点);
  * 本地/动态 = 本机监听 bind:port。updateRow 与重绘共用 */
-function refreshPortChip(chip: HTMLSpanElement, t: TunnelDto): void {
-  const k = t.kind;
+function refreshPortChip(chip: HTMLSpanElement, dt: TunnelDto): void {
+  const k = dt.kind;
   if ("reverse" in k) {
     if (k.reverse.port > 0) {
       chip.className = "port-chip bound";
       chip.textContent = `:${k.reverse.port}`;
-      chip.title = "服务器监听端口 (127.0.0.1)";
+      chip.title = t("chip.remote");
     } else {
       chip.className = "port-chip dyn";
-      chip.textContent = "动态分配";
-      chip.title = "服务器端口 0 = 连接后由服务器分配, 回填显示";
+      chip.textContent = t("chip.dyn");
+      chip.title = t("chip.dynTitle");
     }
   } else if ("local" in k) {
     chip.className = "port-chip";
     chip.textContent = `${k.local.bind}:${k.local.port}`;
-    chip.title = "本机监听端口";
+    chip.title = t("chip.local");
   } else {
     chip.className = "port-chip";
     chip.textContent = `${k.dynamic.bind}:${k.dynamic.port}`;
-    chip.title = "本机 SOCKS5 监听端口";
+    chip.title = t("chip.socks");
   }
 }
 
@@ -330,7 +357,7 @@ function updateRow(t: TunnelDto) {
   const refs = rowRefs.get(t.id);
   if (!refs) return;
   refs.status.className = `status-badge ${t.state}`;
-  refs.status.textContent = STATUS_TEXT[t.state] ?? t.state;
+  refs.status.textContent = statusText(t.state);
   const isErr = t.state === "error";
   refs.msg.textContent = t.message ?? "";
   refs.msgRow.classList.toggle("hidden", !t.message);
@@ -355,16 +382,14 @@ function updateRow(t: TunnelDto) {
   }
 }
 
-/** 把一批隧道行渲染进容器 (服务器详情页; rowRefs 单容器假设: 同一时刻只显示一页)。
- * U4 行结构: head(展开|名称+形态+端口chip|状态徽章|时长|启动/停止+⋯) + 摘要行 + 消息行 + 详情 */
-function renderTunnelRows(container: HTMLElement, list: TunnelDto[]) {
-  closeMenus(); // 行将整表重建, 悬挂的菜单锚点一并收掉
-  container.innerHTML = "";
-  for (const t of list) {
-    const profile = profiles.find((p) => p.id === t.profileId);
-    noteConnected(t); // 非事件路径进 connected (初始加载/拉取) 从本时刻起算
-    const card = document.createElement("div");
-    card.className = "card tunnel-card";
+/** 单行构建 (U4 行结构: head(展开|名称+形态+端口chip|状态徽章|时长|启动/停止+⋯) + 摘要行 + 消息行 + 详情)。
+ * 增量渲染 (R8): 只有新隧道才走这里; 已有行走 updateRow —— 见 syncTunnelRows */
+function buildTunnelRow(container: HTMLElement, dt: TunnelDto) {
+  const profile = profiles.find((p) => p.id === dt.profileId);
+  noteConnected(dt); // 非事件路径进 connected (初始加载/拉取) 从本时刻起算
+  const card = document.createElement("div");
+  card.className = "card tunnel-card";
+  card.dataset.tid = dt.id; // 增量定位锚点 (syncTunnelRows 移除用)
 
     // --- 头部: 展开钮 + 名称/形态/端口chip + 状态徽章 + 运行时长 + 主操作/⋯ ---
     const head = document.createElement("div");
@@ -374,18 +399,18 @@ function renderTunnelRows(container: HTMLElement, list: TunnelDto[]) {
     expand.type = "button";
     expand.className = "icon-btn tunnel-expand";
     expand.innerHTML = icon("chevron-right", 14);
-    expand.setAttribute("aria-label", "展开日志");
+    expand.setAttribute("aria-label", t("row.expandLogs"));
 
     const title = document.createElement("div");
     title.className = "tunnel-title";
     title.innerHTML =
-      `<strong>${escapeHtml(t.name)}</strong>` +
-      `<span class="tunnel-kind">${kindLabel(t.kind)}</span>`;
+      `<strong>${escapeHtml(dt.name)}</strong>` +
+      `<span class="tunnel-kind">${kindLabel(dt.kind)}</span>`;
     const portChip = document.createElement("span");
     title.append(portChip);
 
     const status = document.createElement("span");
-    status.className = `status-badge ${t.state}`;
+    status.className = `status-badge ${dt.state}`;
 
     const uptime = document.createElement("span");
     uptime.className = "tunnel-uptime";
@@ -395,16 +420,16 @@ function renderTunnelRows(container: HTMLElement, list: TunnelDto[]) {
     actions.className = "tunnel-actions";
     const btnStart = document.createElement("button");
     btnStart.type = "button";
-    btnStart.innerHTML = `${icon("play", 13)}<span class="btn-label">启动</span>`;
+    btnStart.innerHTML = `${icon("play", 13)}<span class="btn-label">${t("row.start")}</span>`;
     const btnStop = document.createElement("button");
     btnStop.type = "button";
-    btnStop.innerHTML = `${icon("square", 13)}<span class="btn-label">停止</span>`;
+    btnStop.innerHTML = `${icon("square", 13)}<span class="btn-label">${t("row.stop")}</span>`;
     const moreBtn = document.createElement("button");
     moreBtn.type = "button";
     moreBtn.className = "icon-btn more-btn";
     moreBtn.innerHTML = icon("ellipsis", 16);
-    moreBtn.setAttribute("aria-label", "更多操作");
-    moreBtn.title = "更多操作";
+    moreBtn.setAttribute("aria-label", t("row.more"));
+    moreBtn.title = t("row.more");
     actions.append(btnStart, btnStop, moreBtn);
 
     head.append(expand, title, status, uptime, actions);
@@ -413,7 +438,7 @@ function renderTunnelRows(container: HTMLElement, list: TunnelDto[]) {
     // --- 摘要行 (参数 · host; ellipsis + title 全文) ---
     const sub = document.createElement("div");
     sub.className = "tunnel-sub";
-    sub.textContent = subLine(t);
+    sub.textContent = subLine(dt);
     sub.title = sub.textContent;
     card.append(sub);
 
@@ -442,13 +467,16 @@ function renderTunnelRows(container: HTMLElement, list: TunnelDto[]) {
     pwInput.type = "password";
     // 密钥档案: 密码框充当密钥口令 (未加密私钥可留空)
     pwInput.placeholder = profile?.identityFile
-      ? `密钥口令 (${profile.username}@${profile.host}, 未加密私钥可留空)`
-      : `SSH 密码 (${profile ? profile.username + "@" + profile.host : "服务器"})`;
+      ? t("row.pwKeyPh", { user: profile.username, host: profile.host })
+      : t("row.pwPh", {
+          user: profile ? profile.username : "",
+          host: profile ? profile.host : "",
+        });
     pwInput.autocomplete = "off";
     const pwBtn = document.createElement("button");
     pwBtn.type = "button";
     pwBtn.className = "primary";
-    pwBtn.textContent = "连接";
+    pwBtn.textContent = t("row.connect");
     pwBar.append(pwInput, pwBtn);
 
     // 日志工具条: 复制 / 清空
@@ -457,18 +485,18 @@ function renderTunnelRows(container: HTMLElement, list: TunnelDto[]) {
     const logCopy = document.createElement("button");
     logCopy.type = "button";
     logCopy.className = "log-copy";
-    logCopy.title = "复制日志";
-    logCopy.innerHTML = `${icon("copy", 13)}<span class="btn-label">复制</span>`;
+    logCopy.title = t("row.copyLog");
+    logCopy.innerHTML = `${icon("copy", 13)}<span class="btn-label">${t("common.copy")}</span>`;
     const logClear = document.createElement("button");
     logClear.type = "button";
     logClear.className = "log-clear";
-    logClear.title = "清空日志";
-    logClear.innerHTML = `${icon("eraser", 13)}<span class="btn-label">清空</span>`;
+    logClear.title = t("row.clearLog");
+    logClear.innerHTML = `${icon("eraser", 13)}<span class="btn-label">${t("row.clear")}</span>`;
     logBar.append(logCopy, logClear);
 
     const logEl = document.createElement("div");
     logEl.className = "log";
-    for (const line of logs.get(t.id) ?? []) logEl.append(makeLogLine(line));
+    for (const line of logs.get(dt.id) ?? []) logEl.append(makeLogLine(line));
     logEl.scrollTop = logEl.scrollHeight; // 初始渲染贴底 (最新在下)
     detailIn.append(pwBar, logBar, logEl);
     detail.append(detailIn);
@@ -476,6 +504,7 @@ function renderTunnelRows(container: HTMLElement, list: TunnelDto[]) {
     container.append(card);
 
     const refs: RowRefs = {
+      card,
       status,
       portChip,
       uptime,
@@ -489,26 +518,26 @@ function renderTunnelRows(container: HTMLElement, list: TunnelDto[]) {
       btnStop,
       moreBtn,
     };
-    rowRefs.set(t.id, refs);
-    const open0 = expanded.has(t.id);
+    rowRefs.set(dt.id, refs);
+    const open0 = expanded.has(dt.id);
     detail.classList.toggle("collapsed", !open0);
     detail.toggleAttribute("inert", !open0); // 收起时移出 Tab 序, 免焦点钻进不可见区
     expand.classList.toggle("open", open0);
-    updateRow(t);
+    updateRow(dt);
 
-    // 密码草稿保护: 正在输入的密码经整表重绘回填并恢复焦点
-    const draft = pwDrafts.get(t.id);
-    if (draft && t.state !== "connecting" && t.state !== "connected") {
+    // 密码草稿保护: 正在输入的密码经整表重绘回填; 仅当销毁前焦点就在本行才恢复焦点
+    const draft = pwDrafts.get(dt.id);
+    if (draft && dt.state !== "connecting" && dt.state !== "connected") {
       pwInput.value = draft;
       pwBar.classList.remove("hidden");
-      pwInput.focus();
+      if (lastPwFocusedId === dt.id) pwInput.focus();
     }
 
     // --- 接线 ---
     expand.addEventListener("click", () => {
-      const open = expanded.has(t.id);
-      if (open) expanded.delete(t.id);
-      else expanded.add(t.id);
+      const open = expanded.has(dt.id);
+      if (open) expanded.delete(dt.id);
+      else expanded.add(dt.id);
       detail.classList.toggle("collapsed", open);
       detail.toggleAttribute("inert", open);
       expand.classList.toggle("open", !open);
@@ -524,25 +553,25 @@ function renderTunnelRows(container: HTMLElement, list: TunnelDto[]) {
     const doStart = async (password: string | null) => {
       try {
         await invoke("tunnel_start", {
-          id: t.id,
+          id: dt.id,
           password: password || null,
           remember: password ? true : null,
         });
-        passwords.set(t.profileId, password);
-        if (password) rememberedIds.add(t.profileId);
-        pwDrafts.delete(t.id);
+        passwords.set(dt.profileId, password);
+        if (password) rememberedIds.add(dt.profileId);
+        pwDrafts.delete(dt.id);
         pwBar.classList.add("hidden");
       } catch (err) {
-        appendLog(t.id, `❌ ${err}`);
+        appendLog(dt.id, `❌ ${err}`);
       }
     };
     btnStart.addEventListener("click", async () => {
       // 优先级: 本次会话输入 > 已记住的加密凭据 (后端兜底, 免输) > 弹条询问
-      if (passwords.has(t.profileId) || rememberedIds.has(t.profileId)) {
-        await doStart(passwords.get(t.profileId) ?? null);
+      if (passwords.has(dt.profileId) || rememberedIds.has(dt.profileId)) {
+        await doStart(passwords.get(dt.profileId) ?? null);
         return;
       }
-      expanded.add(t.id);
+      expanded.add(dt.id);
       detail.classList.remove("collapsed");
       detail.removeAttribute("inert");
       expand.classList.add("open");
@@ -555,85 +584,88 @@ function renderTunnelRows(container: HTMLElement, list: TunnelDto[]) {
         pwInput.focus();
         return;
       }
-      await withLoading(pwBtn, () => doStart(pwInput.value || null), "连接中...");
+      await withLoading(pwBtn, () => doStart(pwInput.value || null), t("row.connecting"));
     });
-    pwInput.addEventListener("input", () => pwDrafts.set(t.id, pwInput.value));
+    pwInput.addEventListener("input", () => pwDrafts.set(dt.id, pwInput.value));
+    pwInput.addEventListener("focus", () => {
+      lastPwFocusedId = dt.id;
+    });
     pwInput.addEventListener("keydown", (e) => {
       if (e.key === "Enter") pwBtn.click();
     });
     logCopy.addEventListener("click", async () => {
-      const text = logText(t.id);
+      const text = logText(dt.id);
       if (!text) {
-        toast("日志为空", "info");
+        toast(t("row.logEmpty"), "info");
         return;
       }
       try {
         await navigator.clipboard.writeText(text);
-        toast("日志已复制", "success");
+        toast(t("row.logCopied"), "success");
       } catch {
-        toast("复制失败", "error");
+        toast(t("common.copyFail"), "error");
       }
     });
     logClear.addEventListener("click", () => {
-      logs.delete(t.id);
+      logs.delete(dt.id);
       logEl.innerHTML = "";
     });
     btnStop.addEventListener("click", async () => {
       try {
-        await invoke("tunnel_stop", { id: t.id });
-        appendLog(t.id, "请求断开...");
+        await invoke("tunnel_stop", { id: dt.id });
+        appendLog(dt.id, t("row.stopping"));
       } catch (err) {
-        appendLog(t.id, `❌ ${err}`);
+        appendLog(dt.id, `❌ ${err}`);
       }
     });
 
     // --- ⋯ 菜单条目动作 (打开时惰性求值, 这里只定义) ---
     const trustNewFingerprint = async () => {
-      const prof = profiles.find((p) => p.id === t.profileId);
+      const prof = profiles.find((p) => p.id === dt.profileId);
       if (!prof) {
-        appendLog(t.id, "❌ 隧道关联的档案缺失, 无法定位指纹记录");
+        appendLog(dt.id, t("row.noProfileErr"));
         return;
       }
       const ok = await dialog({
-        title: "信任新指纹并重连?",
-        body: `将清除 ${prof.host}:${prof.port} 的旧指纹记录, 重连后重新记忆当前指纹。\n仅当服务器确已重装/更换时继续 —— 否则可能是中间人攻击。`,
-        confirmText: "信任并重连",
+        title: t("fp.trustTitle"),
+        body: t("fp.trustBody", { host: prof.host, port: prof.port }),
+        confirmText: t("fp.trustConfirm"),
         danger: true,
       });
       if (!ok) return;
       try {
         await invoke("known_hosts_forget", { host: prof.host, port: prof.port });
-        appendLog(t.id, `已清除 ${prof.host}:${prof.port} 的指纹记录, 重连后将重新记忆当前指纹`);
+        appendLog(dt.id, t("fp.forgotLog", { host: prof.host, port: prof.port }));
       } catch (err) {
-        appendLog(t.id, `❌ ${err}`);
+        appendLog(dt.id, `❌ ${err}`);
         return;
       }
       // 复用启动路径: 有缓存密码直接重启, 否则展开密码条
       btnStart.click();
     };
     const runAction = async (cmd: "verify_remote_tunnel" | "deploy_wrapper") => {
-      if (!passwords.has(t.profileId) && !rememberedIds.has(t.profileId)) {
-        appendLog(t.id, "需要凭据: 请先启动隧道 (或重新输入密码/口令)");
+      if (!passwords.has(dt.profileId) && !rememberedIds.has(dt.profileId)) {
+        appendLog(dt.id, t("row.needCreds"));
         btnStart.click();
         return;
       }
-      const pass = passwords.get(t.profileId) ?? null; // null → 后端兜底用记住的凭据
+      const pass = passwords.get(dt.profileId) ?? null; // null → 后端兜底用记住的凭据
       // busy 挂在行内 ⋯ 钮上 (菜单即点即关, 反馈落在持久元素)
       await withLoading(moreBtn, async () => {
         try {
-          await invoke<string>(cmd, { id: t.id, password: pass || null });
+          await invoke<string>(cmd, { id: dt.id, password: pass || null });
           // 输出经 tunnel-log 事件回流行内日志, 此处不重复
         } catch (err) {
-          appendLog(t.id, `❌ ${err}`);
+          appendLog(dt.id, `❌ ${err}`);
         }
       });
     };
     const saveScenario = async () => {
       const r = await dialog({
-        title: "存为我的场景",
-        body: "以当前隧道的形态与参数保存, 新建隧道时直接复用。",
-        input: { value: t.name, placeholder: "场景名称" },
-        confirmText: "保存",
+        title: t("sc.saveTitle"),
+        body: t("sc.saveBody"),
+        input: { value: dt.name, placeholder: t("sc.namePh") },
+        confirmText: t("common.save"),
       });
       // 确认但空名视为取消
       if (typeof r !== "string" || !r.trim()) return;
@@ -644,42 +676,42 @@ function renderTunnelRows(container: HTMLElement, list: TunnelDto[]) {
             id: crypto.randomUUID(),
             name,
             description: "",
-            kind: t.kind,
-            backend: t.backend,
+            kind: dt.kind,
+            backend: dt.backend,
           },
         });
-        appendLog(t.id, `已保存场景「${name}」`);
+        appendLog(dt.id, t("sc.saved", { name }));
       } catch (err) {
-        appendLog(t.id, `❌ 保存场景失败: ${err}`);
+        appendLog(dt.id, t("sc.saveFailLog", { err: String(err) }));
       }
     };
     const deleteTunnel = async () => {
       const ok = await dialog({
-        title: `删除隧道「${t.name}」?`,
-        body: "运行中的隧道会先停止。",
-        confirmText: "删除",
+        title: t("tun.delTitle", { name: dt.name }),
+        body: t("tun.delBody"),
+        confirmText: t("common.delete"),
         danger: true,
       });
       if (!ok) return;
       try {
-        tunnels = await invoke<TunnelDto[]>("tunnel_delete", { id: t.id });
-        connectedSince.delete(t.id);
-        pwDrafts.delete(t.id);
+        tunnels = await invoke<TunnelDto[]>("tunnel_delete", { id: dt.id });
+        connectedSince.delete(dt.id);
+        pwDrafts.delete(dt.id);
         renderHosts();
         if (detailView === "detail") renderServerDetail();
       } catch (err) {
-        appendLog(t.id, `❌ ${err}`);
+        appendLog(dt.id, `❌ ${err}`);
       }
     };
 
     /** 打开瞬间取最新状态计算条目 (hidden/disabled 按当时 state 出没, 与重绘解耦) */
     const menuItems = (): MenuItem[] => {
-      const cur = currentTunnel(t.id) ?? t;
+      const cur = currentTunnel(dt.id) ?? dt;
       const prof = profiles.find((p) => p.id === cur.profileId);
       const items: MenuItem[] = [];
       if (cur.state === "reconnecting") {
         items.push({
-          label: "立即重试",
+          label: t("menu.retryNow"),
           icon: "rotate-ccw",
           action: async () => {
             try {
@@ -692,9 +724,9 @@ function renderTunnelRows(container: HTMLElement, list: TunnelDto[]) {
       }
       if (cur.state === "error" && (cur.message ?? "").includes("指纹已变更")) {
         items.push({
-          label: "信任新指纹",
+          label: t("menu.trustFp"),
           icon: "shield-check",
-          title: "服务器指纹变更被拒后, 清除记录并重连 (仅服务器确已重装/更换时使用)",
+          title: t("menu.trustFpTitle"),
           action: trustNewFingerprint,
         });
       }
@@ -702,16 +734,16 @@ function renderTunnelRows(container: HTMLElement, list: TunnelDto[]) {
         const vpnEnabled = cur.state === "connected" && !needPassword(cur);
         items.push(
           {
-            label: "验证外网",
+            label: t("menu.verify"),
             icon: "globe",
-            title: "在服务器上经隧道测试访问外网 (google)",
+            title: t("menu.verifyTitle"),
             disabled: !vpnEnabled,
             action: () => runAction("verify_remote_tunnel"),
           },
           {
-            label: "部署 proxy",
+            label: t("menu.deploy"),
             icon: "terminal",
-            title: "部署 proxy 命令, 服务器上可 'proxy curl ...' 走隧道",
+            title: t("menu.deployTitle"),
             disabled: !vpnEnabled,
             action: () => runAction("deploy_wrapper"),
           },
@@ -719,16 +751,16 @@ function renderTunnelRows(container: HTMLElement, list: TunnelDto[]) {
       }
       if (items.length) items.push({ separator: true });
       items.push({
-        label: "存为场景",
+        label: t("menu.saveScenario"),
         icon: "bookmark",
-        title: "把这条隧道的形态/参数存为「我的场景」, 新建隧道时复用",
+        title: t("menu.saveScenarioTitle"),
         action: saveScenario,
       });
       items.push({
-        label: "开机自启",
+        label: t("menu.autostart"),
         icon: "power",
         checked: cur.enabled,
-        title: "系统启动时后台拉起此隧道 (密码/口令已记住或私钥免口令即可免交互)",
+        title: t("menu.autostartTitle"),
         action: async () => {
           try {
             tunnels = await invoke<TunnelDto[]>("tunnel_set_enabled", {
@@ -736,10 +768,7 @@ function renderTunnelRows(container: HTMLElement, list: TunnelDto[]) {
               enabled: !cur.enabled,
             });
             if (!cur.enabled && prof && !rememberedIds.has(prof.id)) {
-              appendLog(
-                cur.id,
-                "提示: 该服务器尚未记住密码, 开机自启时无法免交互启动; 启动一次并记住密码即可覆盖"
-              );
+              appendLog(cur.id, t("menu.autostartHintLog"));
             }
             renderHosts();
           } catch (err) {
@@ -748,18 +777,36 @@ function renderTunnelRows(container: HTMLElement, list: TunnelDto[]) {
         },
       });
       items.push({ separator: true });
-      items.push({ label: "删除", icon: "trash-2", danger: true, title: "删除隧道配置", action: deleteTunnel });
+      items.push({ label: t("menu.delete"), icon: "trash-2", danger: true, title: t("menu.deleteTitle"), action: deleteTunnel });
       return items;
     };
 
     moreBtn.addEventListener("click", (e) => {
       e.stopPropagation();
-      if (menuTag() === t.id) {
+      if (menuTag() === dt.id) {
         closeMenus(); // 再点同一 ⋯ = 关闭
         return;
       }
-      openMenu(moreBtn, menuItems, t.id);
+      openMenu(moreBtn, menuItems, dt.id);
     });
+}
+
+/** 增量渲染 (R8 #1 重绘风暴): 已有行 updateRow, 新行 buildTunnelRow, 消失行移除。
+ * 重连风暴/事件流下不再整表 innerHTML 重建 —— 只改文本节点, hover/焦点不重置 */
+function syncTunnelRows(container: HTMLElement, list: TunnelDto[]) {
+  const ids = new Set(list.map((t) => t.id));
+  let removed = false;
+  for (const [id, refs] of rowRefs) {
+    if (!ids.has(id)) {
+      refs.card.remove();
+      rowRefs.delete(id);
+      removed = true;
+    }
+  }
+  if (removed) closeMenus(); // 行被移除时收起悬挂菜单 (锚点已脱离 DOM)
+  for (const t of list) {
+    if (rowRefs.has(t.id)) updateRow(t);
+    else buildTunnelRow(container, t);
   }
 }
 
@@ -767,13 +814,18 @@ function currentTunnel(id: string): TunnelDto | undefined {
   return tunnels.find((t) => t.id === id);
 }
 
-/** 双拉隧道 + 档案 (档案列表曾只 init 拉一次导致陈旧); 托盘常驻场景由 window focus 兜底刷新 */
+/** 请求序号: focus 防抖与 connected 事件两条路径并发, 过期响应 (last-write-wins) 丢弃 */
+let refreshSeq = 0;
+
+/** 三拉隧道 + 档案 + 已记住凭据 (档案列表曾只 init 拉一次导致陈旧); 托盘常驻场景由 window focus 兜底刷新 */
 async function refreshTunnels() {
+  const my = ++refreshSeq;
   const [ts, ps, secs] = await Promise.all([
     invoke<TunnelDto[]>("tunnels_list"),
     invoke<Profile[]>("list_profiles"),
     invoke<string[]>("secrets_status").catch(() => [] as string[]),
   ]);
+  if (my !== refreshSeq) return; // 已有更新的请求落盘, 本响应作废
   tunnels = ts;
   profiles = ps;
   rememberedIds = new Set(secs);
@@ -814,8 +866,8 @@ listen("tunnel-status", (e) => {
     updateRow(t);
     if (p.message && p.state !== "connected")
       appendLog(p.id, p.state === "error" ? `❌ ${p.message}` : p.message);
-    // 块状态点/计数随事件刷新 (总在)
-    renderHosts();
+    // 中列块状态点/pill/▶ 随事件增量更新 (R8: 不再全量重建 host-grid)
+    updateHostBlock(t.profileId);
     if (p.state === "connected") {
       // 端口 0 动态分配回填会改 spec, 连接成功时拉一次最新列表
       refreshTunnels().catch(() => {});
@@ -826,17 +878,17 @@ listen("tunnel-status", (e) => {
 /** TOFU 首连记住指纹 → 可点击复制的 toast (替代裸日志行, 美化提示) */
 function fpRememberedToast(fingerprint: string): void {
   toastRich({
-    html: `已记住服务器指纹（首次连接）<code>${escapeHtml(fingerprint)}</code>`,
+    html: `${escapeHtml(t("fp.toast"))}<code>${escapeHtml(fingerprint)}</code>`,
     kind: "success",
     icon: "shield-check",
     ms: 8000,
-    title: "点击复制指纹",
+    title: t("fp.clickCopy"),
     onClick: async () => {
       try {
         await navigator.clipboard.writeText(fingerprint);
-        toast("指纹已复制", "success");
+        toast(t("fp.copied"), "success");
       } catch {
-        toast("复制失败", "error");
+        toast(t("common.copyFail"), "error");
       }
     },
   });
@@ -872,109 +924,163 @@ function profileAggregate(p: Profile): { total: number; running: number; state: 
   return { total: mine.length, running: states.filter((s) => s === "connected").length, state };
 }
 
+/** 服务器块引用表: 事件级增量补丁 (R8: 重连风暴/事件刷屏不再整表重建) */
+interface HostBlockRefs {
+  blk: HTMLDivElement;
+  nameText: HTMLElement;
+  addr: HTMLElement;
+  dot: HTMLElement;
+  pill: HTMLElement;
+  toggle: HTMLButtonElement;
+}
+const hostBlocks = new Map<string, HostBlockRefs>();
+let newBlockBtn: HTMLButtonElement | undefined;
+
+function buildHostBlock(p: Profile): HTMLDivElement {
+  const block = document.createElement("div");
+  block.className = "host-block";
+  if (p.id === selectedProfileId) block.classList.add("active");
+
+  // 行 1: 状态点 + 名称 (右留白给 ▶ 钮; 状态类/文本由 updateHostBlock 补丁)
+  const name = document.createElement("div");
+  name.className = "hb-name";
+  const dot = document.createElement("span");
+  dot.className = "hb-status";
+  const nameText = document.createElement("span");
+  nameText.textContent = p.name;
+  name.append(dot, nameText);
+
+  // 行 2: 地址 + 右槽 (运行 pill ⇄ hover 换出 编辑/删除 图标钮, 同位交叉淡换)
+  const meta = document.createElement("div");
+  meta.className = "hb-meta";
+  const addr = document.createElement("div");
+  addr.className = "hb-addr";
+  const side = document.createElement("div");
+  side.className = "hb-side";
+  const acts = document.createElement("div");
+  acts.className = "hb-acts";
+  const editBtn = document.createElement("button");
+  editBtn.type = "button";
+  editBtn.className = "hb-act";
+  editBtn.title = t("host.edit");
+  editBtn.setAttribute("aria-label", t("host.editAria", { name: p.name }));
+  editBtn.innerHTML = icon("pencil", 13);
+  editBtn.addEventListener("click", (e) => {
+    e.stopPropagation();
+    selectProfile(p.id);
+    openServerForm(p);
+  });
+  const delBtn = document.createElement("button");
+  delBtn.type = "button";
+  delBtn.className = "hb-act danger";
+  delBtn.title = t("host.del");
+  delBtn.setAttribute("aria-label", t("host.delAria", { name: p.name }));
+  delBtn.innerHTML = icon("trash-2", 13);
+  delBtn.addEventListener("click", (e) => {
+    e.stopPropagation();
+    selectProfile(p.id);
+    void deleteProfileFlow(p);
+  });
+  acts.append(editBtn, delBtn);
+  const pill = document.createElement("span");
+  pill.className = "hb-pill";
+  side.append(pill, acts);
+  meta.append(addr, side);
+
+  // ▶ 一键启动 enabled 隧道 / ■ 全部停止 (右上角圆形钮; 点击时读图标态, 不用构建时快照)
+  const toggle = document.createElement("button");
+  toggle.type = "button";
+  toggle.className = "hb-toggle";
+  toggle.addEventListener("click", (e) => {
+    e.stopPropagation();
+    selectProfile(p.id);
+    const stopping = toggle.classList.contains("stop");
+    // busy 期间防双击重复启停 (状态点即时反馈, 图标钮不显 spinner —— CSS 抑制)
+    withLoading(toggle, () => (stopping ? stopAllForProfile(p) : startAllForProfile(p)));
+  });
+
+  block.append(name, meta, toggle);
+  block.addEventListener("click", () => selectProfile(p.id));
+  // a11y: 块是可聚焦的"选中"卡片; 内层按钮保留自己的 Tab 位, 键事件不冒泡处理
+  block.tabIndex = 0;
+  block.setAttribute("role", "button");
+  block.setAttribute("aria-label", t("host.aria", { name: p.name }));
+  block.addEventListener("keydown", (e) => {
+    if (e.target !== block) return;
+    if (e.key === "Enter" || e.key === " ") {
+      e.preventDefault();
+      selectProfile(p.id);
+    }
+  });
+  hostBlocks.set(p.id, { blk: block, nameText, addr, dot, pill, toggle });
+  return block;
+}
+
+/** 事件级局部补丁: 只改状态点/pill/▶/名称/地址, 不重建块 (重连风暴下每次事件只动几个节点) */
+function updateHostBlock(profileId: string) {
+  const refs = hostBlocks.get(profileId);
+  const p = refs ? profiles.find((x) => x.id === profileId) : undefined;
+  if (!refs || !p) return;
+  const agg = profileAggregate(p);
+  refs.nameText.textContent = p.name;
+  refs.addr.innerHTML =
+    `${escapeHtml(`${p.host}:${p.port} · ${p.username}`)}` +
+    (p.identityFile ? ` <span class="hb-key" title="${escapeHtml(t("auth.key"))}">${icon("key", 12)}</span>` : "");
+  refs.dot.className = `hb-status ${agg.state}`;
+  refs.dot.title = agg.state || t("host.idleTitle");
+  refs.pill.classList.toggle("running", agg.running > 0);
+  refs.pill.textContent =
+    agg.total === 0 ? t("host.noTunnels") : t("host.running", { r: agg.running, t: agg.total });
+  refs.pill.title =
+    agg.total === 0
+      ? t("host.noTunnelsTitle")
+      : t("host.runningTitle", { r: agg.running, t: agg.total });
+  const anyActive = tunnels.some(
+    (t) => t.profileId === profileId && ACTIVE_STATES.includes(t.state)
+  );
+  refs.toggle.classList.toggle("stop", anyActive);
+  refs.toggle.innerHTML = anyActive ? icon("square", 13) : icon("play", 13);
+  refs.toggle.setAttribute("aria-label", anyActive ? t("host.stopAll") : t("host.startAll"));
+  refs.toggle.title = anyActive ? t("host.stopAllTitle") : t("host.startAllTitle");
+}
+
+/** 选中高亮类 (selectProfile 走这里, 不再重建) */
+function updateHostActive() {
+  for (const [id, refs] of hostBlocks) refs.blk.classList.toggle("active", id === selectedProfileId);
+}
+
 function renderHosts() {
   const grid = el<HTMLDivElement>("host-grid");
-  grid.innerHTML = "";
-
-  for (const p of profiles) {
-    const agg = profileAggregate(p);
-    const block = document.createElement("div");
-    block.className = "host-block";
-    if (p.id === selectedProfileId) block.classList.add("active");
-
-    // 行 1: 状态点 + 名称 (右留白给 ▶ 钮)
-    const name = document.createElement("div");
-    name.className = "hb-name";
-    const dot = document.createElement("span");
-    dot.className = `hb-status ${agg.state}`;
-    dot.title = agg.state || "无隧道运行";
-    const nameText = document.createElement("span");
-    nameText.textContent = p.name;
-    name.append(dot, nameText);
-
-    // 行 2: 地址 + 右槽 (运行 pill ⇄ hover 换出 编辑/删除 图标钮, 同位交叉淡换)
-    const meta = document.createElement("div");
-    meta.className = "hb-meta";
-    const addr = document.createElement("div");
-    addr.className = "hb-addr";
-    addr.innerHTML =
-      `${escapeHtml(`${p.host}:${p.port} · ${p.username}`)}` +
-      (p.identityFile ? ` <span class="hb-key" title="密钥认证">${icon("key", 12)}</span>` : "");
-    const pill = document.createElement("span");
-    pill.className = "hb-pill" + (agg.running > 0 ? " running" : "");
-    pill.textContent =
-      agg.total === 0 ? "无隧道" : `${agg.running}/${agg.total} 运行`;
-    pill.title =
-      agg.total === 0 ? "还没有隧道" : `${agg.running} 条运行 / 共 ${agg.total} 条`;
-    const side = document.createElement("div");
-    side.className = "hb-side";
-    const acts = document.createElement("div");
-    acts.className = "hb-acts";
-    const editBtn = document.createElement("button");
-    editBtn.type = "button";
-    editBtn.className = "hb-act";
-    editBtn.title = "编辑服务器";
-    editBtn.setAttribute("aria-label", `编辑服务器 ${p.name}`);
-    editBtn.innerHTML = icon("pencil", 13);
-    editBtn.addEventListener("click", (e) => {
-      e.stopPropagation();
-      selectProfile(p.id);
-      openServerForm(p);
-    });
-    const delBtn = document.createElement("button");
-    delBtn.type = "button";
-    delBtn.className = "hb-act danger";
-    delBtn.title = "删除服务器";
-    delBtn.setAttribute("aria-label", `删除服务器 ${p.name}`);
-    delBtn.innerHTML = icon("trash-2", 13);
-    delBtn.addEventListener("click", (e) => {
-      e.stopPropagation();
-      selectProfile(p.id);
-      void deleteProfileFlow(p);
-    });
-    acts.append(editBtn, delBtn);
-    side.append(pill, acts);
-    meta.append(addr, side);
-
-    // ▶ 一键启动 enabled 隧道 / ■ 全部停止 (右上角圆形钮)
-    const toggle = document.createElement("button");
-    toggle.type = "button";
-    toggle.className = "hb-toggle";
-    const anyActive = tunnels.some(
-      (t) => t.profileId === p.id && ACTIVE_STATES.includes(t.state)
-    );
-    if (anyActive) toggle.classList.add("stop");
-    toggle.innerHTML = anyActive ? icon("square", 13) : icon("play", 13);
-    toggle.setAttribute("aria-label", anyActive ? "全部停止" : "一键启动");
-    toggle.title = anyActive
-      ? "停止该服务器的全部隧道"
-      : "一键启动该服务器全部 enabled 隧道 (首次需输密码, 之后记住免输)";
-    toggle.addEventListener("click", (e) => {
-      e.stopPropagation();
-      selectProfile(p.id);
-      // busy 期间防双击重复启停 (状态点即时反馈, 图标钮不显 spinner —— CSS 抑制)
-      withLoading(toggle, () => (anyActive ? stopAllForProfile(p) : startAllForProfile(p)));
-    });
-
-    block.append(name, meta, toggle);
-    block.addEventListener("click", () => selectProfile(p.id));
-    grid.append(block);
+  const alive = new Set(profiles.map((p) => p.id));
+  // 集合 diff: 档案删了摘块, 新增建块, 已存在走局部补丁
+  for (const [id, refs] of hostBlocks) {
+    if (!alive.has(id)) {
+      refs.blk.remove();
+      hostBlocks.delete(id);
+    }
   }
-
+  for (const p of profiles) {
+    if (!hostBlocks.has(p.id)) grid.append(buildHostBlock(p));
+    updateHostBlock(p.id); // 新建块也走同一补丁初始化 (初始态/名称/地址)
+  }
+  // + 新建块 (持久元素, 不随刷新重建)
+  if (!newBlockBtn || !newBlockBtn.isConnected) {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.className = "host-block new-block";
+    b.innerHTML = `${icon("plus", 14)}<span class="btn-label">${t("host.newBtn")}</span>`;
+    b.addEventListener("click", () => openServerForm(null));
+    grid.append(b);
+    newBlockBtn = b;
+  }
+  updateHostActive();
   cmdGenRefreshProfiles();
-
-  // + 新建块
-  const newBlock = document.createElement("button");
-  newBlock.type = "button";
-  newBlock.className = "host-block new-block";
-  newBlock.innerHTML = `${icon("plus", 14)}<span class="btn-label">新建</span>`;
-  newBlock.addEventListener("click", () => openServerForm(null));
-  grid.append(newBlock);
 }
 
 function selectProfile(id: string | null) {
+  if (id !== selectedProfileId) pdPwState = null; // 换档案, 挂起的批量密码条作废 (草稿只属于原档案)
   selectedProfileId = id;
-  renderHosts();
+  updateHostActive();
   setDetailView(id ? "detail" : "empty");
 }
 
@@ -989,8 +1095,8 @@ async function startAllForProfile(p: Profile) {
   }
   // 密码档案且既没本次输入也没记住 → 右面板密码条收集一次, 再批量启动
   if (!p.identityFile && !passwords.has(p.id) && !rememberedIds.has(p.id)) {
-    pdPwTargets = targets;
-    renderServerDetail(true);
+    pdPwState = { profileId: p.id, targets, draft: "", focused: true };
+    renderServerDetail();
     el<HTMLInputElement>("pd-pw-input")?.focus();
     return;
   }
@@ -1009,12 +1115,12 @@ async function stopAllForProfile(p: Profile) {
   const targets = tunnels.filter(
     (t) => t.profileId === p.id && ACTIVE_STATES.includes(t.state)
   );
-  for (const t of targets) {
+  for (const tn of targets) {
     try {
-      await invoke("tunnel_stop", { id: t.id });
-      appendLog(t.id, "请求断开...");
+      await invoke("tunnel_stop", { id: tn.id });
+      appendLog(tn.id, t("row.stopping"));
     } catch (err) {
-      appendLog(t.id, `❌ ${err}`);
+      appendLog(tn.id, `❌ ${err}`);
     }
   }
 }
@@ -1032,7 +1138,18 @@ function setDetailView(view: DetailView) {
   detailView = view;
   for (const id of Object.values(DP_VIEWS)) el(id).classList.add("hidden");
   el(DP_VIEWS[view]).classList.remove("hidden");
-  if (view === "detail") renderServerDetail();
+  if (view === "detail") {
+    renderServerDetail();
+  } else {
+    // 离开详情: 摘掉隧道行 DOM + 清引用 —— 防旧行被后续事件幽灵更新/泄漏
+    // 记录销毁前焦点所在行, 重建时只恢复它的密码输入焦点
+    const ae = document.activeElement;
+    lastPwFocusedId =
+      ae instanceof HTMLElement ? ae.closest(".tunnel-card")?.getAttribute("data-tid") ?? null : null;
+    for (const [, refs] of rowRefs) refs.card.remove();
+    if (rowRefs.size > 0) closeMenus();
+    rowRefs.clear();
+  }
 }
 
 // ---------- 命令生成页: 隧道命令生成器 (命令在服务器 A 上执行, 经 SSH 到目标 B) ----------
@@ -1062,12 +1179,12 @@ function cmdGenBuild(): { ssh: string; autossh: string; hint: string } {
   const autossh = `AUTOSSH_GATETIME=0 autossh -M 0 -N ${fwd} ${opts} ${dest}`;
 
   let hint: string;
-  if (kind === "local") hint = `这条命令在 A 上运行：A 开出端口 ${bind ? "0.0.0.0" : "127.0.0.1"}:${listen}，连它的流量经 SSH 送到 B，再由 B 去连 ${thost}:${tport}`;
-  else if (kind === "reverse") hint = `这条命令在 A 上运行，但端口开在 B 上（${bind ? "0.0.0.0" : "127.0.0.1"}:${listen}）；B 上这个端口的流量经 SSH 回到 A，由 A 去连 ${thost}:${tport}`;
-  else hint = `这条命令在 A 上运行：A 会多出一个 SOCKS5 代理（127.0.0.1:${listen}），程序把代理指向它，流量就从 B 出去了`;
-  if (kind === "reverse" && bind) hint += "。注意：想让 B 同一网络的其他机器也能连，B 的 sshd 要设 GatewayPorts yes，默认只有 B 自己连得上";
+  if (kind === "local") hint = t("cg.hintL", { bind: bind ? "0.0.0.0" : "127.0.0.1", listen, thost, tport });
+  else if (kind === "reverse") hint = t("cg.hintR", { bind: bind ? "0.0.0.0" : "127.0.0.1", listen, thost, tport });
+  else hint = t("cg.hintD", { listen });
+  if (kind === "reverse" && bind) hint += t("cg.hintGateway");
   const sel = profiles.find((p) => p.id === el<HTMLSelectElement>("cg-profile").value);
-  if (sel?.identityFile) hint += "。这个档案平时用密钥登录——但命令要在 A 上跑，A 上也得有私钥（可加参数 -i ~/.ssh/id_ed25519）";
+  if (sel?.identityFile) hint += t("cg.hintKeyFile");
   return { ssh, autossh, hint };
 }
 
@@ -1097,24 +1214,24 @@ function renderCmdFlow(
     `<div class="flow-node"><span class="flow-ic">${icon(ic, 18)}</span><div class="flow-tx"><strong>${escapeHtml(title)}</strong><span>${escapeHtml(sub)}</span></div></div>`;
   const arrow = (lab: string) =>
     `<div class="flow-arrow">${icon("arrow-right", 14)}<span>${escapeHtml(lab)}</span></div>`;
-  const bTxt = escapeHtml(v.host || "B 的地址");
+  const bTxt = escapeHtml(v.host || t("cg.bAddr"));
   const target = `${v.thost}:${v.tport}`;
   let html: string;
   if (kind === "local") {
     html =
-      node("monitor", "A · 跑命令的机器", `A 上开端口 :${v.listen}`) + arrow("SSH") +
-      node("server", "B · 目标服务器", bTxt) + arrow("B 帮忙连") +
-      node("globe", target, "这个地址从 B 那边连");
+      node("monitor", t("cg.flowA"), t("cg.flowAOpen", { p: v.listen })) + arrow("SSH") +
+      node("server", t("cg.flowB"), bTxt) + arrow(t("cg.arrowB")) +
+      node("globe", target, t("cg.fromB"));
   } else if (kind === "reverse") {
     html =
-      node("server", "B · 目标服务器", `${bTxt} · 开端口 :${v.listen}`) + arrow("SSH") +
-      node("monitor", "A · 跑命令的机器", "命令在这台机器上运行") + arrow("A 帮忙连") +
-      node("globe", target, "这个地址从 A 那边连");
+      node("server", t("cg.flowB"), t("cg.flowBOpen", { addr: bTxt, p: v.listen })) + arrow("SSH") +
+      node("monitor", t("cg.flowA"), t("cg.flowARun")) + arrow(t("cg.arrowA")) +
+      node("globe", target, t("cg.fromA"));
   } else {
     html =
-      node("monitor", "A · 跑命令的机器", `SOCKS5 代理 :${v.listen}`) + arrow("SSH") +
-      node("server", "B · 目标服务器", bTxt) + arrow("B 帮忙连") +
-      node("globe", "任意地址", "从 B 那边连出去");
+      node("monitor", t("cg.flowA"), t("cg.flowSocks", { p: v.listen })) + arrow("SSH") +
+      node("server", t("cg.flowB"), bTxt) + arrow(t("cg.arrowB")) +
+      node("globe", t("cg.anyAddr"), t("cg.anyFromB"));
   }
   el<HTMLElement>("cg-flow").innerHTML = html;
 }
@@ -1169,7 +1286,7 @@ function refreshCmdRecipes() {
   sel.innerHTML = "";
   const ph = document.createElement("option");
   ph.value = "";
-  ph.textContent = cmdRecipes.length ? "载入已保存的命令…" : "还没有保存的命令";
+  ph.textContent = cmdRecipes.length ? t("cg.loadPh") : t("cg.nonePh");
   sel.append(ph);
   for (const r of cmdRecipes) {
     const o = document.createElement("option");
@@ -1182,8 +1299,8 @@ function refreshCmdRecipes() {
 
 function suggestCmdName(p: CmdParamsT): string {
   return p.kind === "dynamic"
-    ? `${p.host} 的代理 :${p.listen}`
-    : `${p.host} → ${p.targetHost}:${p.targetPort}`;
+    ? t("cg.suggestD", { host: p.host, listen: p.listen })
+    : t("cg.suggestLR", { host: p.host, thost: p.targetHost, tport: p.targetPort });
 }
 
 /** 存为命令 (选中已有条目 = 更新它; dialog 输入名) */
@@ -1192,13 +1309,13 @@ async function saveCmdRecipe() {
   const selId = el<HTMLSelectElement>("cg-recipes").value;
   const cur = cmdRecipes.find((r) => r.id === selId);
   const name = await dialog({
-    title: "保存命令",
-    body: "给这组参数起个名字，下次直接从「我的命令」里载入。",
+    title: t("cg.saveTitle"),
+    body: t("cg.saveBody"),
     input: { value: cur?.name ?? suggestCmdName(params) },
   });
   if (typeof name !== "string") return;
   if (!name.trim()) {
-    toast("命令名称不能为空", "error");
+    toast(t("cg.nameEmpty"), "error");
     return;
   }
   try {
@@ -1208,7 +1325,7 @@ async function saveCmdRecipe() {
     cmdRecipes = list;
     refreshCmdRecipes();
     el<HTMLSelectElement>("cg-recipes").value = cur?.id ?? list[list.length - 1]?.id ?? "";
-    toast("命令已保存", "success");
+    toast(t("cg.saved"), "success");
   } catch (err) {
     toast(String(err), "error");
   }
@@ -1217,16 +1334,16 @@ async function saveCmdRecipe() {
 async function deleteCmdRecipe() {
   const id = el<HTMLSelectElement>("cg-recipes").value;
   if (!id) {
-    toast("先在下拉框里选中一条命令", "info");
+    toast(t("cg.pickFirst"), "info");
     return;
   }
   const r = cmdRecipes.find((x) => x.id === id);
   if (
     !(await dialog({
-      title: "删除命令",
-      body: `确定删除「${r?.name ?? ""}」吗？`,
+      title: t("cg.delTitle"),
+      body: t("cg.delBody", { name: r?.name ?? "" }),
       danger: true,
-      confirmText: "删除",
+      confirmText: t("common.delete"),
     }))
   ) {
     return;
@@ -1234,7 +1351,7 @@ async function deleteCmdRecipe() {
   try {
     cmdRecipes = await invoke<CmdRecipeT[]>("cmdgen_delete", { id });
     refreshCmdRecipes();
-    toast("已删除", "success");
+    toast(t("cg.deleted"), "success");
   } catch (err) {
     toast(String(err), "error");
   }
@@ -1249,14 +1366,20 @@ function scheduleCmdLastSave() {
   }, 1200);
 }
 
+/** 档案集合指纹: 下拉只在实际变化时重建 (R8: renderHosts 每次刷新都调, 事件风暴下省掉无谓 DOM 重建) */
+let lastProfilesKey: string | null = null;
+
 /** 档案下拉选项刷新 (renderHosts 后调用 —— profiles 变化的汇聚点) */
 function cmdGenRefreshProfiles() {
+  const key = profiles.map((p) => `${p.id}:${p.name}:${p.host}:${p.port}:${p.username}`).join("|");
+  if (key === lastProfilesKey) return;
+  lastProfilesKey = key;
   const sel = el<HTMLSelectElement>("cg-profile");
   const prev = sel.value;
   sel.innerHTML = "";
   const manual = document.createElement("option");
   manual.value = "";
-  manual.textContent = "手动输入";
+  manual.textContent = t("cg.manual");
   sel.append(manual);
   for (const p of profiles) {
     const o = document.createElement("option");
@@ -1296,14 +1419,14 @@ function initCmdGen() {
     r.addEventListener("change", cmdGenRegen);
   }
   for (const b of document.querySelectorAll<HTMLButtonElement>(".cmd-copy")) {
-    b.innerHTML = `${icon("copy", 12)}<span class="btn-label">复制</span>`;
+    b.innerHTML = `${icon("copy", 12)}<span class="btn-label">${t("common.copy")}</span>`;
     b.addEventListener("click", async () => {
       const { ssh, autossh } = cmdGenBuild();
       try {
         await navigator.clipboard.writeText(b.dataset.cmd === "autossh" ? autossh : ssh);
-        toast("命令已复制", "success");
+        toast(t("cg.copied"), "success");
       } catch {
-        toast("复制失败", "error");
+        toast(t("common.copyFail"), "error");
       }
     });
   }
@@ -1349,12 +1472,15 @@ function initHelp() {
 async function deleteProfileFlow(p: Profile) {
   const used = tunnels.filter((t) => t.profileId === p.id);
   const body = used.length
-    ? `有 ${used.length} 条隧道关联此服务器 (${used.map((t) => t.name).join(", ")}), 删除后这些隧道将无法启动。`
+    ? t("pf.delBody", {
+        n: used.length,
+        names: used.map((t) => t.name).join(", "),
+      })
     : undefined;
   const ok = await dialog({
-    title: `删除服务器「${p.name}」?`,
+    title: t("pf.delTitle", { name: p.name }),
     body,
-    confirmText: "删除",
+    confirmText: t("common.delete"),
     danger: true,
   });
   if (!ok) return;
@@ -1365,14 +1491,20 @@ async function deleteProfileFlow(p: Profile) {
     renderHosts();
     setDetailView("empty");
   } catch (err) {
-    toast(`删除失败: ${err}`, "error");
+    toast(t("common.delFail", { err: String(err) }), "error");
   }
 }
 
-/** renderServerDetail(showPwBar): 一键启动的密码条显隐 */
-function renderServerDetail(showPwBar = false) {
+/** 隧道空态提示 (持久元素, 跟 syncTunnelRows 的摘挂走, 避免重建) */
+const listHint = document.createElement("div");
+listHint.className = "hint tight";
+listHint.textContent = t("detail.noTunnels");
+
+/** 服务器详情渲染 (R8: 行走 syncTunnelRows diff; 密码条 pdPwState 驱动, 重绘回填草稿不丢输入) */
+function renderServerDetail() {
   const p = selectedProfile();
   if (!p) {
+    pdPwState = null;
     setDetailView("empty");
     return;
   }
@@ -1383,29 +1515,35 @@ function renderServerDetail(showPwBar = false) {
   title.className = "pd-title";
   title.innerHTML =
     `<strong>${escapeHtml(p.name)}</strong>` +
-    `<span>${escapeHtml(p.host)}:${p.port} · ${escapeHtml(p.username)} · ${p.identityFile ? icon("key", 12) + " 密钥认证" : "密码认证"}</span>`;
+    `<span>${escapeHtml(p.host)}:${p.port} · ${escapeHtml(p.username)} · ${p.identityFile ? icon("key", 12) + " " + escapeHtml(t("auth.key")) : escapeHtml(t("auth.password"))}</span>`;
   const genBtn = document.createElement("button");
   genBtn.type = "button";
   genBtn.className = "pd-gen";
-  genBtn.title = "为此服务器生成隧道命令 (命令生成页)";
-  genBtn.innerHTML = `${icon("terminal", 14)}<span class="btn-label">生成命令</span>`;
+  genBtn.title = t("pd.genTitle");
+  genBtn.innerHTML = `${icon("terminal", 14)}<span class="btn-label">${t("pd.gen")}</span>`;
   genBtn.addEventListener("click", () => jumpToCmdGen(p));
   head.append(title, genBtn);
 
-  // 一键启动密码条 (密码档案首次 ▶ 时出现)
+  // 一键启动密码条 (状态驱动: pdPwState 匹配当前档案才显示; 换档案即作废)
   const pwbar = el<HTMLDivElement>("pd-pwbar");
   pwbar.innerHTML = "";
-  pwbar.classList.toggle("hidden", !showPwBar);
-  if (showPwBar) {
+  const st = pdPwState !== null && pdPwState.profileId === p.id ? pdPwState : null;
+  pwbar.classList.toggle("hidden", st === null);
+  if (st) {
     const input = document.createElement("input");
     input.id = "pd-pw-input";
     input.type = "password";
     input.autocomplete = "off";
-    input.placeholder = `SSH 密码 (${p.username}@${p.host}, 启动 ${pdPwTargets.length} 条隧道)`;
+    input.placeholder = t("pd.batchPwPh", {
+      user: p.username,
+      host: p.host,
+      n: st.targets.length,
+    });
+    input.value = st.draft; // 重绘回填, 批量启动期间刷新不丢输入
     const btn = document.createElement("button");
     btn.type = "button";
     btn.className = "primary";
-    btn.textContent = `连接 ${pdPwTargets.length} 条隧道`;
+    btn.textContent = t("pd.batchConnect", { n: st.targets.length });
     btn.addEventListener("click", async () => {
       if (!input.value) {
         input.focus();
@@ -1413,10 +1551,9 @@ function renderServerDetail(showPwBar = false) {
       }
       passwords.set(p.id, input.value);
       rememberedIds.add(p.id);
+      pdPwState = null;
       pwbar.classList.add("hidden");
-      const targets = pdPwTargets;
-      pdPwTargets = [];
-      for (const t of targets) {
+      for (const t of st.targets) {
         try {
           await invoke("tunnel_start", { id: t.id, password: input.value, remember: true });
         } catch (err) {
@@ -1424,21 +1561,22 @@ function renderServerDetail(showPwBar = false) {
         }
       }
     });
+    input.addEventListener("input", () => {
+      if (pdPwState) pdPwState.draft = input.value;
+    });
     input.addEventListener("keydown", (e) => {
       if (e.key === "Enter") btn.click();
     });
     pwbar.append(input, btn);
+    if (st.focused) input.focus(); // 重建后恢复焦点
   }
 
-  // 该服务器的隧道行
-  rowRefs.clear();
+  // 该服务器的隧道行 (diff: 跨档案切换时旧档案的行随 refs 一并摘除)
   const mine = tunnels.filter((t) => t.profileId === p.id);
   const listEl = el<HTMLDivElement>("pd-tunnels");
-  if (mine.length === 0) {
-    listEl.innerHTML = '<div class="hint tight">还没有隧道 —— 点右上「＋ 新建隧道」从场景开始</div>';
-  } else {
-    renderTunnelRows(listEl, mine);
-  }
+  listHint.remove();
+  syncTunnelRows(listEl, mine);
+  if (mine.length === 0) listEl.append(listHint);
 
   fillSecretCard(p);
   fillFingerprint(p);
@@ -1456,27 +1594,27 @@ function fillSecretCard(p: Profile) {
   if (!remembered) {
     const none = document.createElement("div");
     none.className = "fp-none";
-    none.textContent = p.identityFile
-      ? "密码: 私钥口令输入一次即记住 (加密保存); 未加密私钥无需输入"
-      : "密码: 首次启动输入后自动记住 (AES-256-GCM 加密保存到本机)";
+    none.textContent = p.identityFile ? t("sec.noneKey") : t("sec.none");
     box.append(none);
     return;
   }
   row.innerHTML =
     `<span class="fp-ic">${icon("key", 16)}</span>` +
-    `<div class="fp-main"><div class="fp-head">已记住${p.identityFile ? "私钥口令" : "密码"}</div>` +
-    `<span class="sec-note">加密保存于本机 (secrets.enc) · 重启与开机自启免输入</span></div>`;
+    `<div class="fp-main"><div class="fp-head">${escapeHtml(p.identityFile ? t("sec.headKey") : t("sec.head"))}</div>` +
+    `<span class="sec-note">${escapeHtml(t("sec.note"))}</span></div>`;
   const actions = document.createElement("div");
   actions.className = "fp-actions";
   const clearBtn = document.createElement("button");
   clearBtn.type = "button";
   clearBtn.className = "danger";
-  clearBtn.textContent = "清除";
+  clearBtn.textContent = t("common.clear");
   clearBtn.addEventListener("click", async () => {
     const ok = await dialog({
-      title: `清除 ${p.name} 记住的${p.identityFile ? "私钥口令" : "密码"}?`,
-      body: "下次启动会重新询问; 服务器上的任何配置不受影响。",
-      confirmText: "清除",
+      title: p.identityFile
+        ? t("sec.clearTitleKey", { name: p.name })
+        : t("sec.clearTitle", { name: p.name }),
+      body: t("sec.clearBody"),
+      confirmText: t("common.clear"),
       danger: true,
     });
     if (!ok) return;
@@ -1484,10 +1622,10 @@ function fillSecretCard(p: Profile) {
       await invoke("secret_forget", { profileId: p.id });
       rememberedIds.delete(p.id);
       passwords.delete(p.id);
-      toast("已清除记住的密码", "success");
+      toast(t("sec.cleared"), "success");
       fillSecretCard(p);
     } catch (err) {
-      toast(`清除失败: ${err}`, "error");
+      toast(t("common.clearFail", { err: String(err) }), "error");
     }
   });
   actions.append(clearBtn);
@@ -1515,7 +1653,7 @@ async function fillFingerprint(p: Profile) {
     if (!hit) {
       const none = document.createElement("div");
       none.className = "fp-none";
-      none.textContent = "指纹: 首次连接后自动记住 (TOFU); 变更即拒绝连接";
+      none.textContent = t("fp.none");
       box.append(none);
       return;
     }
@@ -1523,7 +1661,7 @@ async function fillFingerprint(p: Profile) {
     row.className = "fp-row";
     row.innerHTML =
       `<span class="fp-ic">${icon("shield-check", 16)}</span>` +
-      `<div class="fp-main"><div class="fp-head">已记住服务器指纹<span class="fp-algo"></span></div>` +
+      `<div class="fp-main"><div class="fp-head">${escapeHtml(t("fp.head"))}<span class="fp-algo"></span></div>` +
       `<code class="fp-code">${escapeHtml(hit.fingerprint)}</code></div>`;
     row.querySelector(".fp-algo")!.textContent = hit.algorithm;
 
@@ -1531,25 +1669,25 @@ async function fillFingerprint(p: Profile) {
     actions.className = "fp-actions";
     const copyBtn = document.createElement("button");
     copyBtn.type = "button";
-    copyBtn.title = "复制指纹";
-    copyBtn.innerHTML = `${icon("copy", 12)}<span class="btn-label">复制</span>`;
+    copyBtn.title = t("fp.copyTitle");
+    copyBtn.innerHTML = `${icon("copy", 12)}<span class="btn-label">${t("common.copy")}</span>`;
     copyBtn.addEventListener("click", async () => {
       try {
         await navigator.clipboard.writeText(hit.fingerprint);
-        toast("指纹已复制", "success");
+        toast(t("fp.copied"), "success");
       } catch {
-        toast("复制失败", "error");
+        toast(t("common.copyFail"), "error");
       }
     });
     const clearBtn = document.createElement("button");
     clearBtn.type = "button";
     clearBtn.className = "danger";
-    clearBtn.textContent = "清除";
+    clearBtn.textContent = t("common.clear");
     clearBtn.addEventListener("click", async () => {
       const ok = await dialog({
-        title: `清除 ${p.host}:${p.port} 的指纹记录?`,
-        body: "下次连接将重新记住当前指纹 (仅服务器确已变更时操作)。",
-        confirmText: "清除",
+        title: t("fp.clearTitle", { host: p.host, port: p.port }),
+        body: t("fp.clearBody"),
+        confirmText: t("common.clear"),
         danger: true,
       });
       if (!ok) return;
@@ -1558,20 +1696,20 @@ async function fillFingerprint(p: Profile) {
         lastFpKey = ""; // 强制重渲染 (清后回到占位态)
         fillFingerprint(p);
       } catch (err) {
-        toast(`清除失败: ${err}`, "error");
+        toast(t("common.clearFail", { err: String(err) }), "error");
       }
     });
     actions.append(copyBtn, clearBtn);
     row.append(actions);
     box.append(row);
   } catch (err) {
-    box.textContent = `指纹信息读取失败: ${err}`;
+    box.textContent = t("fp.loadFail", { err: String(err) });
   }
 }
 
 // ---------- 服务器表单 (新建/编辑) ----------
 function openServerForm(p: Profile | null) {
-  el<HTMLSpanElement>("sf-title").textContent = p ? "编辑服务器" : "新建服务器";
+  el<HTMLSpanElement>("sf-title").textContent = p ? t("sf.titleEdit") : t("sf.titleNew");
   el<HTMLInputElement>("profile-id").value = p?.id ?? "";
   el<HTMLInputElement>("profile-name").value = p?.name ?? "";
   el<HTMLInputElement>("profile-host").value = p?.host ?? "";
@@ -1594,7 +1732,7 @@ el<HTMLFormElement>("server-form").addEventListener("submit", async (e) => {
   const shareSel = el<HTMLSelectElement>("profile-share").value;
   const shareConnection = shareSel === "" ? null : shareSel === "on";
   if (!name || !host || !username) {
-    toast("请填写名称、地址和用户名", "info");
+    toast(t("sf.needFields"), "info");
     return;
   }
   const btn =
@@ -1610,10 +1748,10 @@ el<HTMLFormElement>("server-form").addEventListener("submit", async (e) => {
         });
         selectProfile(id); // 保存后选中并进入详情
       } catch (err) {
-        toast(`保存失败: ${err}`, "error");
+        toast(t("common.saveFail", { err: String(err) }), "error");
       }
     },
-    "保存中..."
+    t("common.saving")
   );
 });
 
@@ -1625,17 +1763,29 @@ el<HTMLButtonElement>("sf-cancel").addEventListener("click", () =>
 );
 
 // ---------- 新建隧道: 选场景 (预设 + 自定义 + 我的场景) ----------
+/** 预设名/描述本地化: 后端 presets_list 返回中文, 前端按 id 覆盖 (未知 id 回退后端串) */
+function presetName(p: Preset): string {
+  const key = `preset.${p.id}.name` as I18nKey;
+  return hasKey(key) ? t(key) : p.name;
+}
+function presetDesc(p: Preset): string {
+  const key = `preset.${p.id}.desc` as I18nKey;
+  return hasKey(key) ? t(key) : p.description;
+}
+
 async function loadScenarios() {
   scenarios = await invoke<Scenario[]>("scenarios_list");
 }
 
 async function openScenarioPick() {
   if (!selectedProfileId) {
-    toast("请先选择服务器", "info");
+    toast(t("sp.needProfile"), "info");
     return;
   }
   setDetailView("scenario-pick");
-  el<HTMLSpanElement>("sp-title").textContent = `新建隧道 — ${selectedProfile()?.name ?? ""}`;
+  el<HTMLSpanElement>("sp-title").textContent = t("sp.titleWith", {
+    name: selectedProfile()?.name ?? "",
+  });
 
   // 预设 (含「自定义」)
   const presetEl = el<HTMLDivElement>("preset-cards");
@@ -1645,18 +1795,18 @@ async function openScenarioPick() {
     const card = document.createElement("button");
     card.type = "button";
     card.className = "preset-card" + (preset.id === "custom" ? " custom" : "");
-    card.innerHTML = `<strong>${escapeHtml(preset.name)}</strong><span>${escapeHtml(preset.description)}</span>`;
+    card.innerHTML = `<strong>${escapeHtml(presetName(preset))}</strong><span>${escapeHtml(presetDesc(preset))}</span>`;
     card.addEventListener("click", async () => {
       try {
         wzSpec = await invoke<TunnelSpec>("tunnel_from_preset", {
           presetId: preset.id,
-          name: preset.id === "custom" ? "新隧道" : preset.name,
+          name: preset.id === "custom" ? t("sp.defaultName") : presetName(preset),
           profileId: selectedProfileId!,
         });
         openTunnelForm({
-          title: preset.name,
-          hint: WZ_HINTS[preset.id] ?? "",
-          defaultName: preset.id === "custom" ? "" : preset.name,
+          title: presetName(preset),
+          hint: WZ_HINTS[preset.id]?.() ?? "",
+          defaultName: preset.id === "custom" ? "" : presetName(preset),
         });
       } catch (err) {
         toast(String(err), "error");
@@ -1679,12 +1829,12 @@ async function openScenarioPick() {
     const del = document.createElement("span");
     del.className = "sc-del";
     del.innerHTML = icon("x", 13);
-    del.title = "删除此场景";
+    del.title = t("sc.delThis");
     del.addEventListener("click", async (e) => {
       e.stopPropagation();
       const ok = await dialog({
-        title: `删除场景「${s.name}」?`,
-        confirmText: "删除",
+        title: t("sc.delTitle", { name: s.name }),
+        confirmText: t("common.delete"),
         danger: true,
       });
       if (!ok) return;
@@ -1692,7 +1842,7 @@ async function openScenarioPick() {
         scenarios = await invoke<Scenario[]>("scenario_delete", { id: s.id });
         openScenarioPick(); // 重渲染卡片
       } catch (err) {
-        toast(`删除失败: ${err}`, "error");
+        toast(t("common.delFail", { err: String(err) }), "error");
       }
     });
     card.append(del);
@@ -1705,7 +1855,7 @@ async function openScenarioPick() {
         });
         openTunnelForm({
           title: s.name,
-          hint: s.description || `来自我的场景「${s.name}」`,
+          hint: s.description || t("sc.fromHint", { name: s.name }),
           defaultName: s.name,
         });
       } catch (err) {
@@ -1719,12 +1869,12 @@ async function openScenarioPick() {
 el<HTMLButtonElement>("pd-new-tunnel").addEventListener("click", openScenarioPick);
 el<HTMLButtonElement>("sp-back").addEventListener("click", () => setDetailView("detail"));
 
-const WZ_HINTS: Record<string, string> = {
-  vpn_share: "服务器经本机 VPN 出外网: 服务器上用 socks5h://127.0.0.1:<端口>",
-  expose_local: "服务器直接访问本机运行的服务 (如本地 dev web)",
-  reach_service: "本机访问服务器侧服务 (如服务器上的数据库/Web)",
-  reach_lan: "应用/浏览器配 SOCKS5 代理即可访问服务器内网任意主机",
-  custom: "自选形态与参数; 反向隧道服务器端口 0 = 动态分配 (连接后回填显示)",
+const WZ_HINTS: Record<string, () => string> = {
+  vpn_share: () => t("wz.hintVpn"),
+  expose_local: () => t("wz.hintExpose"),
+  reach_service: () => t("wz.hintReach"),
+  reach_lan: () => t("wz.hintLan"),
+  custom: () => t("wz.hintCustom"),
 };
 
 // ---------- 新建隧道: 表单 (kind/backend 驱动) ----------
@@ -1772,33 +1922,33 @@ function wzFieldsForSpec(spec: TunnelSpec): WzField[] {
     const fields: WzField[] = [
       {
         id: "port",
-        label: "服务器监听端口 (0 = 动态分配)",
+        label: t("wz.rPort"),
         value: k.reverse.port,
-        hint: "0 由服务器分配实际端口, 连接后显示在摘要里",
+        hint: t("wz.rPortHint"),
       },
     ];
     if ("socksAuto" in b) {
       fields.push({
         id: "fallback",
-        label: "本机 VPN SOCKS 端口 (探测不到时内置)",
+        label: t("wz.fallback"),
         value: b.socksAuto.fallbackPort,
       });
     } else {
       fields.push(
-        { id: "host", label: "本地服务地址", value: b.tcp[0] },
-        { id: "lport", label: "本地服务端口", value: b.tcp[1] }
+        { id: "host", label: t("wz.tcpHost"), value: b.tcp[0] },
+        { id: "lport", label: t("wz.tcpPort"), value: b.tcp[1] }
       );
     }
     return fields;
   }
   if ("local" in k) {
     return [
-      { id: "port", label: "本机监听端口", value: k.local.port },
-      { id: "thost", label: "目标主机 (服务器视角)", value: k.local.targetHost },
-      { id: "tport", label: "目标端口", value: k.local.targetPort },
+      { id: "port", label: t("wz.lPort"), value: k.local.port },
+      { id: "thost", label: t("wz.tHost"), value: k.local.targetHost },
+      { id: "tport", label: t("wz.tPort"), value: k.local.targetPort },
     ];
   }
-  return [{ id: "port", label: "本机 SOCKS5 端口", value: k.dynamic.port }];
+  return [{ id: "port", label: t("wz.dPort"), value: k.dynamic.port }];
 }
 
 function renderTunnelFields() {
@@ -1841,15 +1991,15 @@ function renderTunnelFields() {
   // 反向 + SOCKS 落地: 「探测并填入」本机 VPN 端口 (原 vpn_share 专属, 结构判定泛化)
   if (formKindOf(wzSpec.kind) === "reverse" && "socksAuto" in wzSpec.backend) {
     const label = document.createElement("label");
-    label.innerHTML = "<span>探测本机 VPN 端口</span>";
+    label.innerHTML = `<span>${escapeHtml(t("wz.probeLabel"))}</span>`;
     const probeBtn = document.createElement("button");
     probeBtn.type = "button";
-    probeBtn.textContent = "探测并填入";
+    probeBtn.textContent = t("wz.probe");
     label.append(probeBtn);
     fields.append(label);
     probeBtn.addEventListener("click", async () => {
       probeBtn.disabled = true;
-      probeBtn.textContent = "探测中...";
+      probeBtn.textContent = t("wz.probing");
       try {
         const results = await invoke<Array<{ port: number; socks5_confirmed: boolean }>>(
           "probe_local_proxy"
@@ -1857,14 +2007,14 @@ function renderTunnelFields() {
         const socks = results.find((r) => r.socks5_confirmed);
         if (socks) {
           el<HTMLInputElement>("wz-f-fallback").value = String(socks.port);
-          probeBtn.textContent = `已填入 ${socks.port}`;
+          probeBtn.textContent = t("wz.probed", { port: socks.port });
         } else {
           probeBtn.textContent = results.length
-            ? `发现端口但非 SOCKS5: ${results.map((r) => r.port).join(", ")}`
-            : "未发现 (VPN 未开? 将用内置 SOCKS)";
+            ? t("wz.probeNoSocks", { ports: results.map((r) => r.port).join(", ") })
+            : t("wz.probeNone");
         }
       } catch (e) {
-        probeBtn.textContent = `探测失败: ${e}`;
+        probeBtn.textContent = t("wz.probeFail", { err: String(e) });
       } finally {
         probeBtn.disabled = false;
       }
@@ -1875,7 +2025,7 @@ function renderTunnelFields() {
 function openTunnelForm(ctx: { title: string; hint: string; defaultName: string }) {
   if (!wzSpec) return;
   setDetailView("tunnel-form");
-  el<HTMLSpanElement>("tf-title").textContent = `新建隧道 — ${ctx.title}`;
+  el<HTMLSpanElement>("tf-title").textContent = t("tf.titleWith", { title: ctx.title });
   el<HTMLDivElement>("wz-hint").textContent = ctx.hint;
   el<HTMLInputElement>("wz-name").value = ctx.defaultName;
   el<HTMLInputElement>("wz-password").value = "";
@@ -1891,8 +2041,8 @@ function openTunnelForm(ctx: { title: string; hint: string; defaultName: string 
 /** 密码栏文案随选中服务器认证方式 (密钥档案: 口令可空) */
 function syncWzPasswordLabel() {
   el("wz-password-label").textContent = selectedProfile()?.identityFile
-    ? "密钥口令 (私钥未加密可留空)"
-    : "密码 (连接成功后加密保存到本机)";
+    ? t("tf.passphraseLabel")
+    : t("tf.password");
 }
 
 /** 形态切换: 重置为该形态的默认参数 (切换即弃当前未保存的参数) */
@@ -1932,18 +2082,18 @@ function wzApplyToSpec(spec: TunnelSpec): string | null {
   switch (currentFormKind()) {
     case "reverse": {
       const port = n("port");
-      if (!Number.isInteger(port) || port < 0 || port > 65535) return "服务器监听端口无效";
+      if (!Number.isInteger(port) || port < 0 || port > 65535) return t("err.rPort");
       spec.kind = { reverse: { bind: "127.0.0.1", port } };
       if (currentFormBackend() === "socksAuto") {
         const fallback = n("fallback");
         if (!Number.isInteger(fallback) || fallback <= 0 || fallback > 65535)
-          return "SOCKS 端口无效";
+          return t("err.fallback");
         spec.backend = { socksAuto: { fallbackPort: fallback } };
       } else {
         const host = v("host");
         const lport = n("lport");
-        if (!host) return "本地服务地址不能为空";
-        if (!Number.isInteger(lport) || lport <= 0 || lport > 65535) return "本地服务端口无效";
+        if (!host) return t("err.tcpHost");
+        if (!Number.isInteger(lport) || lport <= 0 || lport > 65535) return t("err.tcpPort");
         spec.backend = { tcp: [host, lport] };
       }
       break;
@@ -1952,9 +2102,9 @@ function wzApplyToSpec(spec: TunnelSpec): string | null {
       const port = n("port");
       const thost = v("thost");
       const tport = n("tport");
-      if (!Number.isInteger(port) || port <= 0 || port > 65535) return "本机监听端口无效";
-      if (!thost) return "目标主机不能为空";
-      if (!Number.isInteger(tport) || tport <= 0 || tport > 65535) return "目标端口无效";
+      if (!Number.isInteger(port) || port <= 0 || port > 65535) return t("err.lPort");
+      if (!thost) return t("err.tHost");
+      if (!Number.isInteger(tport) || tport <= 0 || tport > 65535) return t("err.tPort");
       spec.kind = {
         local: { bind: "127.0.0.1", port, targetHost: thost, targetPort: tport },
       };
@@ -1962,7 +2112,7 @@ function wzApplyToSpec(spec: TunnelSpec): string | null {
     }
     case "dynamic": {
       const port = n("port");
-      if (!Number.isInteger(port) || port <= 0 || port > 65535) return "本机 SOCKS5 端口无效";
+      if (!Number.isInteger(port) || port <= 0 || port > 65535) return t("err.dPort");
       spec.kind = { dynamic: { bind: "127.0.0.1", port } };
       break;
     }
@@ -1978,7 +2128,7 @@ async function submitTunnelForm(start: boolean, btn?: HTMLButtonElement | null) 
   errEl.textContent = "";
   const name = el<HTMLInputElement>("wz-name").value.trim();
   if (!name) {
-    errEl.textContent = "请填写名称";
+    errEl.textContent = t("err.name");
     return;
   }
   const profileId = selectedProfileId;
@@ -1986,7 +2136,7 @@ async function submitTunnelForm(start: boolean, btn?: HTMLButtonElement | null) 
   const password = el<HTMLInputElement>("wz-password").value;
   // 密钥档案口令可空 (passphrase: None); 密码档案须本次输入/会话缓存/已记住其一
   if (start && !password && !selectedProfile()?.identityFile && cached === undefined && !rememberedIds.has(profileId)) {
-    errEl.textContent = "启动需要密码";
+    errEl.textContent = t("err.needPassword");
     return;
   }
   const spec: TunnelSpec = { ...wzSpec, name, profileId };
@@ -2019,9 +2169,9 @@ async function submitTunnelForm(start: boolean, btn?: HTMLButtonElement | null) 
               backend: spec.backend,
             },
           });
-          toast(`已保存场景「${scenarioName}」`, "success");
+          toast(t("sc.saved", { name: scenarioName }), "success");
         } catch (err) {
-          appendLog(spec.id, `❌ 保存场景失败: ${err}`);
+          appendLog(spec.id, t("sc.saveFailLog", { err: String(err) }));
         }
       }
       if (start) {
@@ -2039,7 +2189,7 @@ async function submitTunnelForm(start: boolean, btn?: HTMLButtonElement | null) 
       await refreshTunnels();
       setDetailView("detail");
     },
-    start ? "启动中..." : "保存中..."
+    start ? t("common.starting") : t("common.saving")
   );
 }
 
@@ -2088,12 +2238,12 @@ el<HTMLButtonElement>("def-save").addEventListener("click", (e) =>
             maxSessions: Number.isFinite(maxSessions) && maxSessions > 0 ? maxSessions : null,
           },
         });
-        toast("默认值已保存", "success");
+        toast(t("set.defaultsSaved"), "success");
       } catch (err) {
-        toast(`保存失败: ${err}`, "error");
+        toast(t("common.saveFail", { err: String(err) }), "error");
       }
     },
-    "保存中..."
+    t("common.saving")
   )
 );
 
@@ -2103,7 +2253,7 @@ el<HTMLInputElement>("autostart").addEventListener("change", async () => {
   try {
     await invoke("autostart_set", { enabled: cb.checked });
   } catch (err) {
-    toast(`设置失败: ${err}`, "error");
+    toast(t("common.setFail", { err: String(err) }), "error");
     cb.checked = !cb.checked;
   }
 });
@@ -2113,6 +2263,48 @@ async function loadAutostart() {
     el<HTMLInputElement>("autostart").checked = await invoke<boolean>("autostart_get");
   } catch (err) {
     console.error("读取开机自启状态失败", err);
+  }
+}
+
+// ---------- 语言切换 (设置页「外观」卡; zh/en 双语) ----------
+/** 语言分段控件: 初态高亮 + 点击切换 (偏好落 pt-lang, 与主题/字号同机制) */
+function initLang() {
+  const seg = document.getElementById("set-lang");
+  if (!seg) return;
+  const sync = () => {
+    for (const b of seg.querySelectorAll("button")) {
+      const on = b.dataset.lang === getLang();
+      b.classList.toggle("active", on);
+      b.setAttribute("aria-pressed", String(on));
+    }
+  };
+  seg.addEventListener("click", (e) => {
+    const b = (e.target as HTMLElement).closest("button");
+    if (b?.dataset.lang) setLang(b.dataset.lang as Lang);
+  });
+  sync();
+  onLangChange(sync);
+}
+
+/** 切语言后的动态内容重渲染: 静态文案由 setLang→applyI18nStatic 处理,
+ * 这里重建 JS 生成的部分 (服务器块/隧道行/命令生成输出)。表单视图不打断 ——
+ * 静态 label 走 data-i18n 即时换, 动态字段 (标题/预设卡) 下次进入时重建 */
+function rerenderOnLangChange() {
+  closeMenus();
+  hostBlocks.clear();
+  rowRefs.clear();
+  const grid = el<HTMLDivElement>("host-grid");
+  grid.innerHTML = "";
+  newBlockBtn = undefined;
+  lastProfilesKey = null; // 档案下拉「手动输入」选项强制重建
+  lastFpKey = ""; // 详情指纹卡强制重渲染
+  listHint.textContent = t("detail.noTunnels");
+  renderHosts();
+  if (detailView === "detail") renderServerDetail();
+  refreshCmdRecipes();
+  cmdGenRegen();
+  for (const b of document.querySelectorAll<HTMLButtonElement>(".cmd-copy")) {
+    b.innerHTML = `${icon("copy", 12)}<span class="btn-label">${t("common.copy")}</span>`;
   }
 }
 
@@ -2134,7 +2326,7 @@ function applyStaticIcons() {
     el<HTMLButtonElement>(id).innerHTML = icon("arrow-left");
   }
   el<HTMLButtonElement>("pd-new-tunnel").innerHTML =
-    `${icon("plus", 15)}<span class="btn-label">新建隧道</span>`;
+    `${icon("plus", 15)}<span class="btn-label">${t("detail.newTunnel")}</span>`;
   // 空态配线性图标
   document.querySelector("#detail-empty .dp-empty")?.insertAdjacentHTML(
     "afterbegin",
@@ -2142,29 +2334,14 @@ function applyStaticIcons() {
   );
 }
 
+// ---------- 初始化 ----------
 applyStaticIcons();
+applyI18nStatic(); // 静态文案 (data-i18n) 初次应用 + document.title
+initLang();
 initAppearance();
 initCmdGen();
 initHelp();
-
-// 滚动条自动隐藏: 滚动时给容器加 .scrolling (CSS 显色 thumb), 静止 400ms 后移除。
-// scroll 不冒泡, 用 capture 拦截所有容器 (content/hosts-col/日志/textarea…)。
-{
-  const timers = new WeakMap<Element, number>();
-  document.addEventListener(
-    "scroll",
-    (e) => {
-      const t = e.target;
-      if (!(t instanceof Element)) return; // document 滚动 (本应用 body 不滚)
-      t.classList.add("scrolling");
-      const prev = timers.get(t);
-      if (prev) clearTimeout(prev);
-      timers.set(t, window.setTimeout(() => t.classList.remove("scrolling"), 400));
-    },
-    true,
-  );
-}
-
+onLangChange(rerenderOnLangChange);
 (async () => {
   // 三拉: 隧道 + 档案 + 已记住凭据 (rememberedIds —— 凭据卡/免输启动/自启判定,
   // 漏拉则新会话 (重启/reload) 恒空, 记住了密码 UI 仍会询问)
