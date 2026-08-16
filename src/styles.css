@@ -297,6 +297,14 @@ body {
 
 .page.active {
   display: block;
+  animation: page-in 0.16s ease-out;
+}
+
+/* 切页入场淡入: display 硬切 (内容整块替换 + servers 页中列 ±264px 宽度瞬变)
+   没有过渡时眼睛感知为 "闪/跳"——淡入 + 轻微上移让替换有缓冲 */
+@keyframes page-in {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: none; }
 }
 
 /* 命令生成/帮助页内容更宽 (图示与命令行需要横向空间) */
@@ -794,6 +802,12 @@ button.danger:hover:not(:disabled) {
 
 .hosts-col.active {
   display: block;
+  animation: page-in 0.16s ease-out;
+}
+
+/* 放两处 animation 声明之后 (同特异性后者胜, 前置会被覆盖) */
+@media (prefers-reduced-motion: reduce) {
+  .page.active, .hosts-col.active { animation: none; }
 }
 
 .host-grid-inner {

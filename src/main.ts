@@ -237,6 +237,8 @@ const pages = document.querySelectorAll<HTMLElement>(".page");
 function showPage(name: string) {
   navItems.forEach((b) => b.classList.toggle("active", b.dataset.page === name));
   pages.forEach((p) => p.classList.toggle("active", p.dataset.page === name));
+  // content 是多个页面共享的滚动容器, 不重置则新页带着上一页的滚动位置出现
+  document.querySelector(".content")?.scrollTo({ top: 0 });
 }
 
 navItems.forEach((b) => b.addEventListener("click", () => showPage(b.dataset.page!)));
