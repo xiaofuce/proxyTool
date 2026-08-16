@@ -24,7 +24,7 @@ if ! git diff-index --quiet HEAD --; then
 fi
 
 if [ "$NOPUSH" != "--no-push" ]; then
-    git rev-parse --verify "$REMOTE" >/dev/null 2>&1 \
+    git remote get-url "$REMOTE" >/dev/null 2>&1 \
         || { echo "缺少远程 '$REMOTE': 先 git remote add $REMOTE <url>"; exit 1; }
 fi
 
