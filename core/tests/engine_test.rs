@@ -50,15 +50,19 @@ impl Collector {
 }
 
 fn creds() -> SshCreds {
+    creds_with(10)
+}
+
+/// 指定 MaxSessions 预算的凭据 (C4 准入用例)
+fn creds_with(max_sessions: u32) -> SshCreds {
     let c = proxy_tool_core::creds::load();
     SshCreds {
         host: c.server.clone(),
         port: c.port,
         username: c.user.clone(),
         auth: AuthMethod::Password(c.pass.clone()),
-        // 默认按产品默认 (共享开) —— 既有引擎用例即覆盖共享路径
         share: true,
-        max_sessions: 10,
+        max_sessions,
     }
 }
 
@@ -767,6 +771,109 @@ async fn ss_listening(
     port: u16,
 ) -> bool {
     ss_listening_raw(known_hosts, port).await >= 1
+}
+
+/// C4 预算准入: 两条 Local (cost 2) + max_sessions=3 —— 第一条入池,
+/// 第二条准入被拒 (已承诺 2+2 > 3) 自动回退独立连接 (游离, 不入池表)。
+/// 两条都应 Running 且通路可用; 池内只 1 租约 1 建连; 日志含回退告警。
+#[tokio::test]
+async fn budget_fallback_to_dedicated() {
+    let registry = Registry::new();
+    let collector = Collector::default();
+    let events: Arc<dyn TunnelEvents> = Arc::new(collector.clone());
+    let mut s1 = local_spec(free_port());
+    s1.profile_id = "p-budget".into();
+    let mut s2 = local_spec(free_port());
+    s2.profile_id = "p-budget".into();
+    registry.create(s1.clone()).expect("创建失败");
+    registry.create(s2.clone()).expect("创建失败");
+
+    let creds = creds_with(3);
+    registry
+        .start(&s1.id, creds.clone(), events.clone())
+        .await
+        .expect("启动失败");
+    wait_state(&registry, &s1.id, |s| matches!(s, TunnelState::Running)).await;
+    registry
+        .start(&s2.id, creds, events.clone())
+        .await
+        .expect("启动失败");
+    wait_state(&registry, &s2.id, |s| matches!(s, TunnelState::Running)).await;
+
+    // 池内只有第一条 (第二条游离, 不入池表)
+    let stats = registry.conn_stats().await;
+    assert_eq!(stats.len(), 1, "池应只有 p-budget 条目: {stats:?}");
+    assert_eq!(stats[0].connect_count, 1, "池内只建连一次");
+    assert_eq!(
+        stats[0].leases,
+        vec![s1.id.clone()],
+        "只有第一条入池: {stats:?}"
+    );
+    // 回退告警出现在日志
+    assert!(
+        collector
+            .logs
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|m| m.contains("共享连接预算已满") && m.contains("自动回退为独立连接")),
+        "应发出预算回退告警: {:?}",
+        collector.logs.lock().unwrap()
+    );
+    // 两条通路都可用 (第二条走自己的独立连接)
+    let b1 = read_banner(listen_port_of(&s1)).await;
+    let b2 = read_banner(listen_port_of(&s2)).await;
+    assert!(b1.contains("SSH-") && b2.contains("SSH-"), "{b1} / {b2}");
+
+    registry.stop(&s1.id).await.expect("停止失败");
+    registry.stop(&s2.id).await.expect("停止失败");
+    wait_state(&registry, &s1.id, |s| matches!(s, TunnelState::Stopped)).await;
+    wait_state(&registry, &s2.id, |s| matches!(s, TunnelState::Stopped)).await;
+}
+
+/// C4 耗尽告警: 一条 Local (cost 2) + max_sessions=2 准入放行;
+/// 并发 2 条数据连接把活通道数压到预算 —— 第 2 条 direct 通道打开时告警
+/// (客户端发起通道也计数, 不止服务器发起的转发)。
+#[tokio::test]
+async fn exhaustion_warning_emitted() {
+    let registry = Registry::new();
+    let collector = Collector::default();
+    let events: Arc<dyn TunnelEvents> = Arc::new(collector.clone());
+    let spec = local_spec(free_port());
+    registry.create(spec.clone()).expect("创建失败");
+    registry
+        .start(&spec.id, creds_with(2), events.clone())
+        .await
+        .expect("启动失败");
+    wait_state(&registry, &spec.id, |s| matches!(s, TunnelState::Running)).await;
+
+    // 两条并发数据连接: 各开一条 direct_tcpip (计数 1 → 2)。
+    // 不读不写保持半开 —— 通道存活期间计数不回零, sshd banner 缓冲即可。
+    let port = listen_port_of(&spec);
+    let mut conns = Vec::new();
+    for _ in 0..2 {
+        conns.push(tokio::net::TcpStream::connect(("127.0.0.1", port)).await.expect("连接失败"));
+    }
+    // 等接受 + 通道打开 + 告警发出 (打开有真实网络往返, 留足窗口)
+    let mut warned = false;
+    for _ in 0..30 {
+        if collector
+            .logs
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|m| m.contains("已达预算"))
+        {
+            warned = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    drop(conns);
+    assert!(warned, "应发出通道数达预算告警: {:?}", collector.logs.lock().unwrap());
+
+    registry.stop(&spec.id).await.expect("停止失败");
+    wait_state(&registry, &spec.id, |s| matches!(s, TunnelState::Stopped)).await;
 }
 
 /// 立即重试: 退避等待期间置 retry_now → 跳过剩余等待马上发起新尝试

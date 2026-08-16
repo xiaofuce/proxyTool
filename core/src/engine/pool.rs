@@ -11,9 +11,12 @@
 //! 锁只在 connect+auth 期间持有; 等待者拿锁后先复查已有活连接则复用 ——
 //! 无惊群重认证 (回归断言: 掉线重连全员建连次数只 +1)。
 //!
-//! MaxSessions 约束: sshd 会话上限 (默认 10) **计入转发通道**。通道计数在
-//! transport::shared (SharedState.open_channels); 预算准入与耗尽回退在 C4
-//! 接入, 本文件先提供成本常量与计数快照 (stats)。
+//! MaxSessions 约束: sshd 会话上限 (默认 10) **计入转发通道**。成本常量
+//! 见顶部 (按形态估); 通道计数在 transport::shared (SharedState.open_channels)。
+//! **准入** (acquire): Σ租约 cost + 本次 ≤ 预算 且 活通道 + 本次 ≤ 预算,
+//! 否则自动回退游离专用连接并告警; **运行期耗尽**的回退走同一入口 —— 客户端
+//! 打开通道被 sshd 拒 → attempt Err → 1s 快试退避 → 再取租约准入被拒 → 游离。
+//! 服务器发起的转发通道 (forwarded-tcpip) 不拒收只计数: sshd 才是权威执法者。
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -49,12 +52,19 @@ struct PooledConn {
     connecting: AsyncMutex<()>,
     /// 当前连接 (None = 无活连接, 下个租约者重建)
     inner: RwLock<Option<ConnState>>,
-    /// 活跃租约 (按隧道 id; 末位释放即断连)
-    leases: Mutex<Vec<String>>,
+    /// 活跃租约 (按隧道 id; 末位释放即断连)。cost = 该隧道占用的
+    /// MaxSessions 预算 (准入用, 按最重形态估)
+    leases: Mutex<Vec<LeaseInfo>>,
     /// 累计建连次数 (single-flight 回归断言)
     connect_count: AtomicU64,
     /// 代际号: 每 (重)建 +1。旧代际租约释放时不误断他人重建的新连接
     generation: AtomicU64,
+}
+
+/// 单条租约的预算占用
+struct LeaseInfo {
+    tunnel_id: String,
+    cost: usize,
 }
 
 struct ConnState {
@@ -105,7 +115,7 @@ impl Lease {
                 generation,
                 ..
             } => {
-                conn.leases.lock().unwrap().retain(|id| id != &self.tunnel_id);
+                conn.leases.lock().unwrap().retain(|l| l.tunnel_id != self.tunnel_id);
                 if conn.leases.lock().unwrap().is_empty() {
                     let mut guard = conn.inner.write().await;
                     let victim = guard
@@ -125,6 +135,26 @@ impl Lease {
 async fn disconnect_handle(handle: &SharedHandle, reason: &str) {
     let h = handle.lock().await;
     let _ = h.disconnect(Disconnect::ByApplication, reason, "").await;
+}
+
+/// 游离专用连接 (share=false 或预算准入拒绝): 不入池表, 释放即断
+async fn connect_dedicated(
+    creds: &SshCreds,
+    keepalive: Keepalive,
+    known_hosts: &Arc<KnownHosts>,
+    logger: &Logger,
+) -> Result<SharedState, TunnelError> {
+    shared::connect(
+        &creds.host,
+        creds.port,
+        &creds.username,
+        &creds.auth,
+        keepalive,
+        known_hosts,
+        creds.max_sessions as usize,
+        logger,
+    )
+    .await
 }
 
 /// 池快照条目 (诊断/测试: single-flight 与租约归属断言)
@@ -150,6 +180,10 @@ impl ConnPool {
 
     /// 获取租约: `share = false` → 游离专用连接; 否则按 profile_id 入池
     /// (无活连接则建连 —— single-flight, 已有则复用)。
+    /// `cost` = 本隧道的 MaxSessions 预算占用 (按形态, pool 顶部常量);
+    /// **准入拒绝 → 也返回游离连接** (预算已满, 自动回退专用并告警)。
+    /// 运行期耗尽的回退同走此处: 客户端打开通道被拒 → attempt Err → 1s 退避
+    /// → 再取租约时活通道计数已超 → 准入拒绝 → 游离连接, 无需额外管线。
     /// 建连/认证失败原样上抛 (attempt 据此进退避)。
     #[allow(clippy::too_many_arguments)]
     pub async fn acquire(
@@ -160,19 +194,10 @@ impl ConnPool {
         keepalive: Keepalive,
         known_hosts: &Arc<KnownHosts>,
         logger: &Logger,
+        cost: usize,
     ) -> Result<Lease, TunnelError> {
         if !creds.share {
-            let state = shared::connect(
-                &creds.host,
-                creds.port,
-                &creds.username,
-                &creds.auth,
-                keepalive,
-                known_hosts,
-                creds.max_sessions as usize,
-                logger,
-            )
-            .await?;
+            let state = connect_dedicated(creds, keepalive, known_hosts, logger).await?;
             return Ok(Lease {
                 kind: LeaseKind::Dedicated(state),
                 tunnel_id: tunnel_id.to_string(),
@@ -184,6 +209,22 @@ impl ConnPool {
                 .or_insert_with(|| Arc::new(PooledConn::new()))
                 .clone()
         };
+        // 准入 (启发式: sshd 才是权威执法者, 客户端计数只防患未然):
+        // 存量租约已承诺 Σcost + 本次 ≤ 预算, 且活通道 + 本次 ≤ 预算。
+        // 拒绝 → 游离专用连接 (独立 sshd 连接有自己的 MaxSessions 预算)。
+        let budget = creds.max_sessions as usize;
+        let committed: usize = conn.leases.lock().unwrap().iter().map(|l| l.cost).sum();
+        let live = conn.live_channels().await;
+        if committed + cost > budget || live + cost > budget {
+            (logger)(&format!(
+                "⚠️ 共享连接预算已满 (租约已承诺 {committed} + 本次 {cost}, 活通道 {live}, 预算 {budget}) —— 本隧道自动回退为独立连接"
+            ));
+            let state = connect_dedicated(creds, keepalive, known_hosts, logger).await?;
+            return Ok(Lease {
+                kind: LeaseKind::Dedicated(state),
+                tunnel_id: tunnel_id.to_string(),
+            });
+        }
         let (state, generation, created) = conn
             .ensure_connected(creds, keepalive, known_hosts, logger)
             .await?;
@@ -196,7 +237,10 @@ impl ConnPool {
                 "共享连接: 复用档案 {profile_id} 现有连接 (代际 {generation})"
             ));
         }
-        conn.leases.lock().unwrap().push(tunnel_id.to_string());
+        conn.leases.lock().unwrap().push(LeaseInfo {
+            tunnel_id: tunnel_id.to_string(),
+            cost,
+        });
         Ok(Lease {
             kind: LeaseKind::Pooled {
                 conn,
@@ -246,7 +290,13 @@ impl ConnPool {
                 generation,
                 connect_count: conn.connect_count.load(Ordering::Relaxed),
                 open_channels,
-                leases: conn.leases.lock().unwrap().clone(),
+                leases: conn
+                    .leases
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .map(|l| l.tunnel_id.clone())
+                    .collect(),
             });
         }
         out
@@ -274,6 +324,16 @@ impl PooledConn {
             }
         }
         None
+    }
+
+    /// 当前活通道数快照 (无连接 → 0; 竞态容忍 —— 预算本就是启发式)
+    async fn live_channels(&self) -> usize {
+        self.inner
+            .read()
+            .await
+            .as_ref()
+            .map(|cs| cs.state.open_channels.load(Ordering::Relaxed))
+            .unwrap_or(0)
     }
 
     /// 确保有活连接: 快路径复用 → 拿 single-flight 锁后复查 (他人可能已

@@ -28,7 +28,7 @@ use crate::ssh::Logger;
 use crate::tunnel::{self, TunnelEvent};
 use crate::TunnelEvents;
 
-use super::pool::ConnPool;
+use super::pool::{self, ConnPool};
 use super::{SessionSlot, SshCreds};
 
 /// 第 n 次重连前的等待时长 (n 从 1 起)。
@@ -255,7 +255,16 @@ async fn attempt(
                 unreachable!("反向隧道配反向会话槽");
             };
             let lease = pool
-                .acquire(&spec.profile_id, &id, creds, keepalive, known_hosts, logger)
+                .acquire(
+                    &spec.profile_id,
+                    &id,
+                    creds,
+                    keepalive,
+                    known_hosts,
+                    logger,
+                    // 形态建连期未定 (std/compat), 按最重形态估
+                    pool::COST_STD_REVERSE,
+                )
                 .await?;
             let r = tunnel::start_tunnel_on(
                 rslot.clone(),
@@ -291,7 +300,15 @@ async fn attempt(
                 known_hosts: known_hosts.clone(),
             };
             let lease = pool
-                .acquire(&spec.profile_id, &id, creds, keepalive, known_hosts, logger)
+                .acquire(
+                    &spec.profile_id,
+                    &id,
+                    creds,
+                    keepalive,
+                    known_hosts,
+                    logger,
+                    pool::COST_DIRECT,
+                )
                 .await?;
             let r = direct::run_local_forward_on(
                 lease.state(),
@@ -336,7 +353,15 @@ async fn attempt(
                 known_hosts: known_hosts.clone(),
             };
             let lease = pool
-                .acquire(&spec.profile_id, &id, creds, keepalive, known_hosts, logger)
+                .acquire(
+                    &spec.profile_id,
+                    &id,
+                    creds,
+                    keepalive,
+                    known_hosts,
+                    logger,
+                    pool::COST_DIRECT,
+                )
                 .await?;
             let r = direct::run_dynamic_forward_on(lease.state(), &cfg, logger.clone(), lease.is_shared())
                 .await;

@@ -159,7 +159,7 @@ async fn forward_and_probe(
         bound_port: Some(bound_port),
     })?;
     // probe 通道存活期间计数 (打开成功 -> 流读尽/drop)
-    let _probe_guard = ChannelGuard::acquire(&state.open_channels);
+    let _probe_guard = ChannelGuard::acquire(&state.open_channels, state.budget, logger);
     probe
         .exec(
             true,

@@ -140,7 +140,8 @@ pub(crate) async fn open_helper(
     let logger2 = logger;
     // helper 通道计数 +1 (至此所有可失败步骤已过), 两个后台任务都结束后
     // 由收尾任务 -1 —— abort 拆除同样覆盖 (JoinHandle 对 abort 返回 Err 也完成)。
-    state.open_channels.fetch_add(1, Ordering::Relaxed);
+    let count = state.open_channels.fetch_add(1, Ordering::Relaxed) + 1;
+    shared::warn_exhausted(count, state.budget, &logger2);
     // 帧读取任务: 通道字节流 -> 帧 -> 队列。
     // 帧协议 (标记帧/CRC/分块/注入同步) 在 transport::frame, 独立单测覆盖;
     // 此任务只做 IO: 读通道 -> feed 解析器 -> 转发帧给转发循环,

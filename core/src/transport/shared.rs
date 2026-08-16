@@ -96,13 +96,7 @@ impl client::Handler for SharedHandler {
             }
         };
         let count = self.open_channels.fetch_add(1, Ordering::Relaxed) + 1;
-        if count >= self.budget {
-            (self.logger)(&format!(
-                "⚠️ 连接通道数 {count} 已达预算 {} —— 服务器 MaxSessions 可能拒绝新转发通道, \
-                 可在默认值中上调 MaxSessions 或关闭共享连接",
-                self.budget
-            ));
-        }
+        warn_exhausted(count, self.budget, &self.logger);
         let logger = self.logger.clone();
         let corrupted = self.corrupted.clone();
         let counter = self.open_channels.clone();
@@ -173,13 +167,25 @@ async fn bridge_forwarded(
     (logger)(&format!("连接关闭 ({r:?})"));
 }
 
+/// 通道计数达到预算时告警 (服务器发起的转发 / 客户端发起的直连共用文案)。
+/// 计数是启发式 —— sshd 才是权威执法者, 这里只提示用户预算将满。
+pub(crate) fn warn_exhausted(count: usize, budget: usize, logger: &Logger) {
+    if count >= budget {
+        (logger)(&format!(
+            "⚠️ 连接通道数 {count} 已达预算 {budget} —— 服务器 MaxSessions 可能拒绝新转发通道, \
+             可在默认值中上调 MaxSessions 或关闭共享连接"
+        ));
+    }
+}
+
 /// 客户端发起通道 (probe / helper / direct_tcpip) 的计数 RAII:
 /// 构造即 +1, Drop 即 -1 (覆盖错误早退路径)
 pub(crate) struct ChannelGuard(Arc<AtomicUsize>);
 
 impl ChannelGuard {
-    pub(crate) fn acquire(counter: &Arc<AtomicUsize>) -> Self {
-        counter.fetch_add(1, Ordering::Relaxed);
+    pub(crate) fn acquire(counter: &Arc<AtomicUsize>, budget: usize, logger: &Logger) -> Self {
+        let count = counter.fetch_add(1, Ordering::Relaxed) + 1;
+        warn_exhausted(count, budget, logger);
         Self(counter.clone())
     }
 }
@@ -198,6 +204,8 @@ pub struct SharedState {
     pub corrupted: Arc<AtomicBool>,
     pub routes: RouteMap,
     pub open_channels: Arc<AtomicUsize>,
+    /// MaxSessions 预算 (告警阈值; 建连时定死, 与 handler 同源)
+    pub budget: usize,
 }
 
 /// 建连入口: 构造 SharedHandler 并完成连接 + 认证。
@@ -246,6 +254,7 @@ pub async fn connect(
         corrupted,
         routes,
         open_channels,
+        budget,
     })
 }
 

@@ -9,6 +9,9 @@
 //! 仅支持 CONNECT 方法, 只绑定 127.0.0.1, 无认证(本机专用)。
 //! 性能: 本机回环内一次 TCP 转发, 延迟 <0.1ms, 开销可忽略。
 
+use std::io;
+use std::pin::Pin;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use tokio::io::{copy_bidirectional, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
@@ -16,7 +19,8 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Notify;
 
 use crate::model::TunnelError;
-use crate::transport::shared::SharedHandle;
+use crate::ssh::Logger;
+use crate::transport::shared::{warn_exhausted, SharedHandle};
 
 /// 桥接用的统一流类型 (TCP 连接或 SSH 通道)
 pub trait DynIo: AsyncRead + AsyncWrite + Unpin + Send {}
@@ -28,28 +32,82 @@ pub type DynStream = Box<dyn DynIo>;
 pub enum Connector {
     /// 直接 TCP 连接 (本机系统路由出网)
     Plain,
-    /// 经 SSH direct_tcpip 通道, 由服务器代连目标 (动态隧道)
-    Ssh { handle: SharedHandle },
+    /// 经 SSH direct_tcpip 通道, 由服务器代连目标 (动态隧道)。
+    /// 计数: 每条通道存活期间 +1 (drop 即 -1), 达预算告警 (MaxSessions)
+    Ssh {
+        handle: SharedHandle,
+        counter: Arc<AtomicUsize>,
+        budget: usize,
+        logger: Logger,
+    },
 }
 
 impl Connector {
     /// 连接目标 (host, port), 返回可桥接的流
-    pub async fn connect(&self, host: &str, port: u16) -> std::io::Result<DynStream> {
+    pub async fn connect(&self, host: &str, port: u16) -> io::Result<DynStream> {
         match self {
             Connector::Plain => {
                 let stream = TcpStream::connect((host, port)).await?;
                 Ok(Box::new(stream))
             }
-            Connector::Ssh { handle } => {
+            Connector::Ssh {
+                handle,
+                counter,
+                budget,
+                logger,
+            } => {
                 let chan = handle
                     .lock()
                     .await
                     .channel_open_direct_tcpip(host, port as u32, "127.0.0.1", 0)
                     .await
-                    .map_err(|e| std::io::Error::other(format!("SSH 直连通道打开失败: {e}")))?;
-                Ok(Box::new(chan.into_stream()))
+                    .map_err(|e| io::Error::other(format!("SSH 直连通道打开失败: {e}")))?;
+                let count = counter.fetch_add(1, Ordering::Relaxed) + 1;
+                warn_exhausted(count, *budget, logger);
+                Ok(Box::new(CountedStream {
+                    inner: chan.into_stream(),
+                    counter: counter.clone(),
+                }))
             }
         }
+    }
+}
+
+/// direct_tcpip 通道的计数包装流: 连接关闭 (drop) 即计数 -1
+struct CountedStream<S> {
+    inner: S,
+    counter: Arc<AtomicUsize>,
+}
+
+impl<S: AsyncRead + Unpin> AsyncRead for CountedStream<S> {
+    fn poll_read(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<io::Result<()>> {
+        std::pin::Pin::new(&mut self.inner).poll_read(cx, buf)
+    }
+}
+
+impl<S: AsyncWrite + Unpin> AsyncWrite for CountedStream<S> {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &[u8],
+    ) -> std::task::Poll<io::Result<usize>> {
+        std::pin::Pin::new(&mut self.inner).poll_write(cx, buf)
+    }
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> std::task::Poll<io::Result<()>> {
+        std::pin::Pin::new(&mut self.inner).poll_flush(cx)
+    }
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> std::task::Poll<io::Result<()>> {
+        std::pin::Pin::new(&mut self.inner).poll_shutdown(cx)
+    }
+}
+
+impl<S> Drop for CountedStream<S> {
+    fn drop(&mut self) {
+        self.counter.fetch_sub(1, Ordering::Relaxed);
     }
 }
 

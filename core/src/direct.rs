@@ -149,6 +149,7 @@ pub async fn run_local_forward_on(
 ) -> Result<(Arc<DirectSession>, tokio::task::JoinHandle<()>), TunnelError> {
     let handle = state.handle.clone();
     let counter: Arc<AtomicUsize> = state.open_channels.clone();
+    let budget = state.budget;
 
     let listener = TcpListener::bind((cfg.listen_host.as_str(), cfg.listen_port))
         .await
@@ -193,6 +194,7 @@ pub async fn run_local_forward_on(
                         let lg = logger2.clone();
                         let tgt = target_host.clone();
                         let counter2 = counter.clone();
+                        let budget2 = budget;
                         tokio::spawn(async move {
                             // 打开 SSH 直连通道 (10s 超时)
                             let chan = match tokio::time::timeout(
@@ -212,7 +214,7 @@ pub async fn run_local_forward_on(
                                 }
                             };
                             // 通道存活期间计数 (打开成功 -> 连接关闭)
-                            let _g = ChannelGuard::acquire(&counter2);
+                            let _g = ChannelGuard::acquire(&counter2, budget2, &lg);
                             let r = copy_bidirectional(&mut stream, &mut chan.into_stream()).await;
                             (lg)(&format!("转发连接关闭 ({r:?})"));
                         });
@@ -258,6 +260,9 @@ pub async fn run_dynamic_forward_on(
     let handle = state.handle.clone();
     let connector = Connector::Ssh {
         handle: handle.clone(),
+        counter: state.open_channels.clone(),
+        budget: state.budget,
+        logger: logger.clone(),
     };
     let server = crate::socks::start_socks_server_with(cfg.listen_port, connector).await?;
     (logger)(&format!(
