@@ -1,13 +1,11 @@
 //! 标准模式传输: sshd 原生 `tcpip_forward` 转发通道 (等价原生 ssh -R, 开销最小)
 //!
 //! 职责:
-//! - `TunnelHandler`: 接收服务器转发的反向连接 —— 首字节污染检查 (只拦
-//!   注入特征 0x00) → 连本地落地 (SOCKS 或 Tcp) → 双向桥接 (每连接独立
-//!   任务, 并发服务)
-//! - `connect_and_auth`: 连接 + 密码认证 (标准/兼容两种模式共用, 桥接模式
-//!   不请求 tcpip_forward, handler 的转发回调不会被触发)
-//! - `establish`: 连接 + tcpip_forward + 污染探测 (与 python_bridge::establish
-//!   同签名, 传输选择依据)
+//! - `establish`: 新 SSH 连接 + tcpip_forward + 污染探测 (与 python_bridge::establish
+//!   同签名, 传输选择依据);
+//! - `establish_forward`: 在**已有**连接上注册转发 (共享连接复用的入口 ——
+//!   路由表注册 + tcpip_forward + 探测, 失败路径取消转发并摘除路由);
+//! - 连接与 Handler 统一在 `transport::shared` (同档案共享连接的前提)。
 //!
 //! 污染检测 (libonion 兼容, 见 frame.rs 协议文档): 云主机安全组件注入 sshd,
 //! 会在 forwarded-tcpip 通道建立时写入审计数据。探测 = 建立转发后让服务器连
@@ -15,154 +13,12 @@
 //! 被注入时是审计数据长度前缀的 0x00)。运行期漏检的注入由 handler 的同一
 //! 检查兜底置位 corrupted, 引擎 (start_tunnel) 监控并重建为兼容模式。
 
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use tokio::io::AsyncReadExt;
 
-use russh::client::{self, ChannelOpenHandle, Msg, Session};
-use russh::Channel;
-use tokio::io::{copy_bidirectional, AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpStream;
-
-use crate::known_hosts::HostKeyCheck;
 use crate::model::TunnelError;
 use crate::ssh::Logger;
+use crate::transport::shared::{self, ChannelGuard, SharedState};
 use crate::tunnel::{TunnelConfig, TunnelSession};
-
-/// russh 客户端 Handler: 接收服务器转发的反向连接并桥接到本地 SOCKS
-pub struct TunnelHandler {
-    pub(crate) cfg: TunnelConfig,
-    pub(crate) logger: Logger,
-    /// 首字节检查发现通道被注入审计数据时置位 (云主机安全组件场景)
-    pub(crate) corrupted: Arc<AtomicBool>,
-    /// 主机密钥 TOFU 校验 (P6; 指纹变更详情经 take_error 取回)
-    pub(crate) host_check: Arc<HostKeyCheck>,
-}
-
-impl client::Handler for TunnelHandler {
-    type Error = russh::Error;
-
-    /// known_hosts TOFU 校验 (首次记住 / 一致放行 / 变更拒绝, 见 known_hosts.rs)
-    async fn check_server_key(
-        &mut self,
-        server_public_key: &ssh_key::PublicKey,
-    ) -> Result<bool, Self::Error> {
-        Ok(self.host_check.verify(server_public_key))
-    }
-
-    /// 服务器有流量要转发回来时被调用:
-    /// 1. 检查通道首字节是否被服务器端组件注入审计数据
-    /// 2. 确认通道 (reply.accept)
-    /// 3. 连本地 SOCKS 代理, 双向桥接 SSH channel <-> SOCKS socket
-    ///
-    /// 注意: 桥接必须放进独立任务。russh 的连接消息循环会 await 本 handler
-    /// 返回的 future, 若在这里 copy_bidirectional 直到结束, 通道数据永远不会被投递。
-    async fn server_channel_open_forwarded_tcpip(
-        &mut self,
-        channel: Channel<Msg>,
-        _connected_address: &str,
-        _connected_port: u32,
-        _originator_address: &str,
-        _originator_port: u32,
-        reply: ChannelOpenHandle,
-        _session: &mut Session,
-    ) -> Result<(), Self::Error> {
-        let target = format!(
-            "{}:{}",
-            self.cfg.local_proxy_host, self.cfg.local_proxy_port
-        );
-        let logger = self.logger.clone();
-        let corrupted = self.corrupted.clone();
-        // 与 russh 自身测试相同: 先在任务里 into_stream, handler 再 accept
-        tokio::spawn(async move {
-            let mut chan = channel.into_stream();
-
-            // 首字节检查 (污染探测的运行期兜底): 云主机安全组件 (如腾讯云
-            // libonion) 在转发通道建立时注入审计数据, 首字节是其长度前缀的
-            // 0x00 — 仅拦截这一注入特征并标记污染 (上层据此重建为兼容模式)。
-            // 其余任意首字节一律放行桥接: 本地落地不一定是 SOCKS (Tcp 落地
-            // 如 HTTP 首字节 'G'), 不能假设 0x05 (干净服务器上误丢会断业务)。
-            // 探测连接写入的 0x58 'X' 等杂字节被转发到本地落地后由其自行
-            // 按坏请求关闭, 无害。
-            let mut head = [0u8; 1];
-            match tokio::time::timeout(std::time::Duration::from_secs(2), chan.read(&mut head))
-                .await
-            {
-                Ok(Ok(0)) | Ok(Err(_)) | Err(_) => {
-                    // 无数据: 探测连接或对端已断开, 静默关闭
-                    (logger)("转发通道无数据, 关闭");
-                    return;
-                }
-                Ok(Ok(_)) if head[0] == 0x00 => {
-                    // 首字节 0x00: 服务器端注入的审计数据 (长度前缀特征)
-                    (logger)(
-                        "检测到转发通道首字节 0x00, 疑似服务器端注入审计数据 (云主机安全组件)",
-                    );
-                    corrupted.store(true, Ordering::Relaxed);
-                    return;
-                }
-                Ok(Ok(_)) => {} // 正常应用数据 (含 SOCKS5 的 0x05), 放行
-            }
-
-            // 桥接: 先连本地 SOCKS, 首字节写回流, 再双向复制
-            let mut stream = match TcpStream::connect(&target).await {
-                Ok(s) => s,
-                Err(e) => {
-                    (logger)(&format!("连接本地代理 {target} 失败: {e}"));
-                    return;
-                }
-            };
-            (logger)(&format!("已连接本地代理 {target}"));
-            if let Err(e) = stream.write_all(&head).await {
-                (logger)(&format!("写回首字节失败: {e}"));
-                return;
-            }
-
-            let r = copy_bidirectional(&mut stream, &mut chan).await;
-            (logger)(&format!("连接关闭 ({r:?})"));
-        });
-        reply.accept().await;
-        Ok(())
-    }
-}
-
-/// 连接 + 密码认证 (标准/兼容两种模式共用), 返回会话与污染标记。
-/// 认证逻辑共用 ssh::connect_auth; 主机密钥经 known_hosts TOFU 校验,
-/// 指纹变更 → `TunnelError::HostKeyChanged` (致命, 见 known_hosts.rs)。
-pub(crate) async fn connect_and_auth(
-    cfg: &TunnelConfig,
-    logger: &Logger,
-) -> Result<(client::Handle<TunnelHandler>, Arc<AtomicBool>), TunnelError> {
-    let corrupted = Arc::new(AtomicBool::new(false));
-    let host_check = HostKeyCheck::new(
-        cfg.known_hosts.clone(),
-        &cfg.server_host,
-        cfg.server_port,
-        logger.clone(),
-    );
-    let handler = TunnelHandler {
-        cfg: cfg.clone(),
-        logger: logger.clone(),
-        corrupted: corrupted.clone(),
-        host_check: host_check.clone(),
-    };
-    let session = match crate::ssh::connect_auth(
-        &cfg.server_host,
-        cfg.server_port,
-        &cfg.username,
-        &cfg.auth,
-        cfg.keepalive,
-        handler,
-        logger,
-    )
-    .await
-    {
-        Ok(s) => s,
-        // 指纹被拒 (russh::Error::UnknownKey) → 致命的 HostKeyChanged,
-        // 避免落入可重试的 Connect 误分类
-        Err(e) => return Err(host_check.take_error().unwrap_or(e)),
-    };
-    Ok((session, corrupted))
-}
 
 /// 标准模式建立: 新 SSH 连接 + tcpip_forward + 污染探测。
 /// 返回 (会话, 服务器实际监听端口) —— `remote_port=0` 时由 sshd 动态分配,
@@ -180,35 +36,106 @@ pub async fn establish(
     cfg: &TunnelConfig,
     logger: &Logger,
 ) -> Result<(TunnelSession, u16), TunnelError> {
-    let (session, corrupted) = connect_and_auth(cfg, logger).await?;
-    let bound_port = establish_forward(&session, cfg, logger).await?;
-    Ok((
-        (Arc::new(tokio::sync::Mutex::new(session)), corrupted),
-        bound_port,
-    ))
+    let state = shared::connect(
+        &cfg.server_host,
+        cfg.server_port,
+        &cfg.username,
+        &cfg.auth,
+        cfg.keepalive,
+        &cfg.known_hosts,
+        shared::DEFAULT_MAX_SESSIONS,
+        logger,
+    )
+    .await?;
+    let bound_port = establish_forward(&state, cfg, logger).await?;
+    Ok(((state.handle, state.corrupted), bound_port))
 }
 
-/// 在已认证会话上: 请求服务器监听 remote_port + 污染探测, 返回实际监听端口。
-async fn establish_forward(
-    session: &client::Handle<TunnelHandler>,
+/// 在已认证连接上注册反向转发: 路由表注册 + tcpip_forward + 污染探测,
+/// 返回服务器实际监听端口。共享连接的复用入口 (专用连接走 establish 同路)。
+///
+/// 路由注册时序 (共享连接上按端口区分各隧道的转发):
+/// - 固定端口: **先注册再转发** (消除「转发已生效、远端连接先到、路由未就绪」
+///   的竞态 —— 固定端口在转发前就被人知晓);
+/// - 端口 0: 转发后按 sshd 回告的实际端口注册 (动态端口只有 sshd 知晓,
+///   回告前无人能连, 无竞态)。
+///
+/// 失败路径: 取消转发 (cancel_tcpip_forward) + 摘除路由 —— 连接可能被其他
+/// 隧道继续使用, 不能留下残留监听。
+pub(crate) async fn establish_forward(
+    state: &SharedState,
     cfg: &TunnelConfig,
     logger: &Logger,
 ) -> Result<u16, TunnelError> {
+    let landing = (cfg.local_proxy_host.clone(), cfg.local_proxy_port);
+    if cfg.remote_port != 0 {
+        state
+            .routes
+            .write()
+            .unwrap()
+            .insert(cfg.remote_port as u16, landing.clone());
+    }
+
+    let result = forward_and_probe(state, cfg, logger).await;
+    match result {
+        Ok(bound_port) => Ok(bound_port),
+        Err(e) => {
+            // 失败清理: 摘除本次注册的路由; 转发若已生效则取消。
+            // (cancel 的 address 必须与 tcpip_forward 同字面值 "localhost",
+            // 见下方 GatewayPorts 注释)
+            if cfg.remote_port != 0 {
+                state.routes.write().unwrap().remove(&(cfg.remote_port as u16));
+            }
+            if let Some(bound) = e.bound_port {
+                let h = state.handle.lock().await;
+                let _ = h.cancel_tcpip_forward("localhost", bound as u32).await;
+                state.routes.write().unwrap().remove(&bound);
+            }
+            Err(e.error)
+        }
+    }
+}
+
+/// 失败时的清理线索: 转发已生效到哪个端口 (探测失败的场景)
+struct ForwardFail {
+    error: TunnelError,
+    bound_port: Option<u16>,
+}
+
+async fn forward_and_probe(
+    state: &SharedState,
+    cfg: &TunnelConfig,
+    logger: &Logger,
+) -> Result<u16, ForwardFail> {
     // bind_address 必须用 "localhost": OpenSSH 的 GatewayPorts 检查只放行
     // "localhost" 字面值 ("127.0.0.1"/"0.0.0.0" 会被拒绝或行为不稳定)。
     // 若 sshd 把 localhost 解析成 IPv6, 探测会失败并自动切换兼容模式。
     // russh 0.62 tcpip_forward 返回服务器实际分配的端口 (remote_port=0 时
     // 为动态分配值, 其余等于请求值)
-    let actual_port = session
-        .tcpip_forward("localhost", cfg.remote_port)
-        .await
-        .map_err(|e| TunnelError::ForwardRejected {
+    let actual_port = {
+        let h = state.handle.lock().await;
+        h.tcpip_forward("localhost", cfg.remote_port).await
+    }
+    .map_err(|e| ForwardFail {
+        error: TunnelError::ForwardRejected {
             port: cfg.remote_port,
             reason: e.to_string(),
-        })?;
-    let bound_port: u16 = actual_port
-        .try_into()
-        .map_err(|_| TunnelError::Protocol(format!("服务器返回异常端口: {actual_port}")))?;
+        },
+        bound_port: None,
+    })?;
+    let bound_port: u16 = actual_port.try_into().map_err(|_| ForwardFail {
+        error: TunnelError::Protocol(format!("服务器返回异常端口: {actual_port}")),
+        bound_port: None,
+    })?;
+
+    // 端口 0 (或服务器改派): 按实际端口注册路由, 摘除预注册的请求端口键
+    if bound_port != cfg.remote_port as u16 {
+        let mut routes = state.routes.write().unwrap();
+        if cfg.remote_port != 0 {
+            routes.remove(&(cfg.remote_port as u16));
+        }
+        routes.insert(bound_port, (cfg.local_proxy_host.clone(), cfg.local_proxy_port));
+    }
     (logger)(&format!(
         "服务器已监听 127.0.0.1:{bound_port} (转发到 127.0.0.1:{})",
         cfg.local_proxy_port
@@ -220,13 +147,19 @@ async fn establish_forward(
     // - PROBE_OK 且未 corrupted (探测的 'X' 等任意字节被正常转发到本地落地): 干净, 标准模式可用
     // 写数据探测比被动等待可靠: 注入发生在"进程首次写"时, 探测写入必然触发。
     // 注意端口用 sshd 实际分配的 bound_port (remote_port=0 时两者不同)。
-    let probe = session
-        .channel_open_session()
-        .await
-        .map_err(|e| TunnelError::ChannelOpen {
+    let probe = {
+        let h = state.handle.lock().await;
+        h.channel_open_session().await
+    }
+    .map_err(|e| ForwardFail {
+        error: TunnelError::ChannelOpen {
             what: "探测通道".into(),
             reason: e.to_string(),
-        })?;
+        },
+        bound_port: Some(bound_port),
+    })?;
+    // probe 通道存活期间计数 (打开成功 -> 流读尽/drop)
+    let _probe_guard = ChannelGuard::acquire(&state.open_channels);
     probe
         .exec(
             true,
@@ -236,7 +169,10 @@ async fn establish_forward(
             ),
         )
         .await
-        .map_err(|e| TunnelError::Protocol(format!("执行探测命令失败: {e}")))?;
+        .map_err(|e| ForwardFail {
+            error: TunnelError::Protocol(format!("执行探测命令失败: {e}")),
+            bound_port: Some(bound_port),
+        })?;
     tokio::time::sleep(std::time::Duration::from_secs(2)).await;
     let mut probe_out = Vec::new();
     let mut stream = probe.into_stream();
@@ -248,10 +184,13 @@ async fn establish_forward(
     let out = String::from_utf8_lossy(&probe_out);
     (logger)(&format!("端口探测结果: {}", out.trim()));
     if !out.contains("PROBE_OK") {
-        return Err(TunnelError::Protocol(format!(
-            "转发端口探测失败, 服务器输出: {}",
-            out.trim()
-        )));
+        return Err(ForwardFail {
+            error: TunnelError::Protocol(format!(
+                "转发端口探测失败, 服务器输出: {}",
+                out.trim()
+            )),
+            bound_port: Some(bound_port),
+        });
     }
     Ok(bound_port)
 }

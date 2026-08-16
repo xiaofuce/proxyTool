@@ -15,7 +15,11 @@
 //!
 //! - `frame`: 兼容模式的帧协议编解码 (标记帧/CRC32/分块/注入同步),
 //!   纯逻辑、独立单测 (P2a)。
+//! - `shared`: 统一 Handler (`SharedHandler`) 与建连入口 —— 三种隧道形态
+//!   共用一个 Handler 类型, 是同档案共享连接 (engine::pool) 的前提;
+//!   各实现的 `*_forward`/`open_helper` 接受已有连接 (connect/use 分离)。
 
 pub mod frame;
 pub mod python_bridge;
 pub mod russh_direct;
+pub mod shared;

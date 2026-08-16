@@ -22,7 +22,7 @@ use std::sync::Arc;
 
 use crate::known_hosts::KnownHosts;
 use crate::model::TunnelError;
-use crate::transport::russh_direct::TunnelHandler;
+use crate::transport::shared::SharedHandle;
 use crate::transport::{python_bridge, russh_direct};
 
 /// 隧道连接配置
@@ -48,10 +48,7 @@ pub struct TunnelConfig {
 pub use crate::ssh::Logger;
 
 /// 隧道会话句柄与污染标记 (标记在运行期被 handler 置位, 由 start_tunnel 监控)
-pub type TunnelSession = (
-    Arc<tokio::sync::Mutex<russh::client::Handle<TunnelHandler>>>,
-    Arc<AtomicBool>,
-);
+pub type TunnelSession = (SharedHandle, Arc<AtomicBool>);
 
 /// 反向隧道会话槽: 调用方 (GUI 的 AppState) 与引擎共享的会话存放处。
 /// GUI 从中取走句柄以断开; 引擎轮询其存在性与 is_closed 判断会话结束。

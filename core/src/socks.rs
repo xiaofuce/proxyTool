@@ -13,9 +13,10 @@ use std::sync::Arc;
 
 use tokio::io::{copy_bidirectional, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::{Mutex, Notify};
+use tokio::sync::Notify;
 
 use crate::model::TunnelError;
+use crate::transport::shared::SharedHandle;
 
 /// 桥接用的统一流类型 (TCP 连接或 SSH 通道)
 pub trait DynIo: AsyncRead + AsyncWrite + Unpin + Send {}
@@ -28,9 +29,7 @@ pub enum Connector {
     /// 直接 TCP 连接 (本机系统路由出网)
     Plain,
     /// 经 SSH direct_tcpip 通道, 由服务器代连目标 (动态隧道)
-    Ssh {
-        handle: Arc<Mutex<russh::client::Handle<crate::ssh::ConnectHandler>>>,
-    },
+    Ssh { handle: SharedHandle },
 }
 
 impl Connector {

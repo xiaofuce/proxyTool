@@ -9,8 +9,7 @@
 //! 帧协议 (标记帧/CRC32/分块/注入同步) 见 `frame`; 本文件 = 通道 IO 编排
 //! (reader 任务 / 转发循环) + 服务器侧 python3 对称实现 (HELPER_PY)。
 
-use std::sync::atomic::AtomicBool;
-use std::sync::Arc;
+use std::sync::atomic::Ordering;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
@@ -18,8 +17,28 @@ use tokio::net::TcpStream;
 use crate::model::TunnelError;
 use crate::ssh::Logger;
 use crate::transport::frame::{self, Frame, FrameParser};
-use crate::transport::russh_direct::connect_and_auth;
+use crate::transport::shared::{self, SharedState};
 use crate::tunnel::{TunnelConfig, TunnelSession};
+
+/// 兼容模式会话: helper 通道两个后台任务的句柄 (租约拆除用)。
+/// abort 任务 -> 通道两半随任务结束 drop (ChannelCloseOnDrop -> CHANNEL_CLOSE)
+/// -> helper stdin EOF 自行退出。
+/// (C1 阶段尚无调用方 —— 反向隧道共享接入租约拆除时启用, 届时移除 allow)
+#[allow(dead_code)]
+pub(crate) struct CompatSession {
+    pub(crate) reader: tokio::task::AbortHandle,
+    pub(crate) forwarder: tokio::task::AbortHandle,
+}
+
+impl CompatSession {
+    /// 拆除本隧道的兼容模式 (不动所在连接): abort 后台任务即可,
+    /// 通道计数由内置的收尾任务在两任务结束后递减。
+    #[allow(dead_code)]
+    pub(crate) fn stop(self) {
+        self.forwarder.abort();
+        self.reader.abort();
+    }
+}
 
 /// 兼容模式建立: 新 SSH 连接 + 会话通道桥接任务。
 /// 污染标记恒 false —— 会话通道不经 sshd 转发路径, 无注入问题。
@@ -30,17 +49,39 @@ pub async fn establish(
     cfg: TunnelConfig,
     logger: Logger,
 ) -> Result<(TunnelSession, u16), TunnelError> {
-    let (session, _) = connect_and_auth(&cfg, &logger).await?;
+    let state = shared::connect(
+        &cfg.server_host,
+        cfg.server_port,
+        &cfg.username,
+        &cfg.auth,
+        cfg.keepalive,
+        &cfg.known_hosts,
+        shared::DEFAULT_MAX_SESSIONS,
+        &logger,
+    )
+    .await?;
+    // CompatSession 任务常驻到通道关闭 (与旧行为一致), 句柄不需要上抛
+    let (_compat, bound_port) = open_helper(&state, &cfg, logger).await?;
+    Ok(((state.handle, state.corrupted), bound_port))
+}
+
+/// 在**已有**连接上启动兼容模式: 开 helper 会话通道 + 帧读取/转发任务。
+/// 共享连接的复用入口 (专用连接走 establish 同路)。
+pub(crate) async fn open_helper(
+    state: &SharedState,
+    cfg: &TunnelConfig,
+    logger: Logger,
+) -> Result<(CompatSession, u16), TunnelError> {
+    let handle = state.handle.clone();
     (logger)(&format!(
         "兼容模式: 在服务器上启动 stdio 转发助手 (请求端口 {})",
         cfg.remote_port
     ));
 
-    let handle = Arc::new(tokio::sync::Mutex::new(session));
     let target = format!("{}:{}", cfg.local_proxy_host, cfg.local_proxy_port);
     let helper_cmd = format!("{} {}", HELPER_PY, cfg.remote_port);
 
-    // 通道建立与端口上报在 establish 内同步完成 (端口 0 时必须知道实际端口
+    // 通道建立与端口上报在 open_helper 内同步完成 (端口 0 时必须知道实际端口
     // 才算建立成功; 助手秒退/上报异常也能在建连阶段报错, 而非静默空转):
     // 一个会话通道按顺序服务多个本地 SOCKS 连接。
     // 通道两侧使用帧协议: [u32 BE 长度][数据], 长度=0 表示连接结束。
@@ -98,11 +139,14 @@ pub async fn establish(
     };
 
     let logger2 = logger;
+    // helper 通道计数 +1 (至此所有可失败步骤已过), 两个后台任务都结束后
+    // 由收尾任务 -1 —— abort 拆除同样覆盖 (JoinHandle 对 abort 返回 Err 也完成)。
+    state.open_channels.fetch_add(1, Ordering::Relaxed);
     // 帧读取任务: 通道字节流 -> 帧 -> 队列。
     // 帧协议 (标记帧/CRC/分块/注入同步) 在 transport::frame, 独立单测覆盖;
     // 此任务只做 IO: 读通道 -> feed 解析器 -> 转发帧给转发循环,
     // 以及 partial 超时 (帧尾丢失, 注入截断) 的计时与重置。
-    {
+    let reader_task = {
         let logger3 = logger2.clone();
         let tx = tx.clone();
         tokio::spawn(async move {
@@ -151,8 +195,8 @@ pub async fn establish(
                 }
             }
             (logger3)("通道读取任务结束");
-        });
-    }
+        })
+    };
 
     // 转发循环 (后台任务): 每个连接: 首帧到达 -> 连本地代理 -> 双向转发 -> 结束帧 -> 下一连接
     let pt_dump = pt_dump_enabled();
@@ -161,7 +205,7 @@ pub async fn establish(
             logger(&msg.to_string());
         }
     };
-    tokio::spawn(async move {
+    let fwd_task = tokio::spawn(async move {
         'outer: loop {
             // 等待连接首帧
             let first = match rx.recv().await {
@@ -266,7 +310,23 @@ pub async fn establish(
         (logger2)("隧道会话通道已结束");
     });
 
-    Ok(((handle, Arc::new(AtomicBool::new(false))), bound_port))
+    // helper 通道计数收尾: 两个后台任务都结束 (自然关闭或 abort) 后递减
+    let reader_abort = reader_task.abort_handle();
+    let fwd_abort = fwd_task.abort_handle();
+    let counter = state.open_channels.clone();
+    tokio::spawn(async move {
+        let _ = fwd_task.await;
+        let _ = reader_task.await;
+        counter.fetch_sub(1, Ordering::Relaxed);
+    });
+
+    Ok((
+        CompatSession {
+            reader: reader_abort,
+            forwarder: fwd_abort,
+        },
+        bound_port,
+    ))
 }
 
 /// PT_DUMP 环境变量: 转发循环/读取任务的逐帧调试转储开关
