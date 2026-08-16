@@ -1020,3 +1020,152 @@ button.danger:hover:not(:disabled) {
   font-weight: 400;
   margin-left: 6px;
 }
+
+/* ===================== U3: toast / dialog / busy ===================== */
+
+/* ---------- toast: 右下角栈 (ui.ts 动态挂 body) ---------- */
+.toast-stack {
+  position: fixed;
+  right: 16px;
+  bottom: 16px;
+  z-index: var(--z-toast);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-width: 360px;
+}
+
+.toast {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 10px 14px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-2);
+  font-size: var(--fs-md);
+  color: var(--text);
+  animation: toast-in 0.18s ease-out;
+}
+
+.toast .ic {
+  margin-top: 1px;
+}
+
+.toast.info .ic { color: var(--info); }
+.toast.success .ic { color: var(--success); }
+.toast.error .ic { color: var(--danger); }
+
+.toast.out {
+  opacity: 0;
+  transition: opacity 0.2s;
+}
+
+@keyframes toast-in {
+  from { opacity: 0; transform: translateY(6px); }
+}
+
+/* ---------- dialog: 遮罩 + 模态 (ui.ts 动态挂 body) ---------- */
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: var(--z-modal);
+  background: rgba(0, 0, 0, 0.45);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+}
+
+.modal {
+  width: min(420px, 100%);
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 18px 20px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-3);
+  animation: modal-in 0.16s ease-out;
+}
+
+.modal-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: var(--fs-lg);
+  font-weight: 600;
+}
+
+.modal-title .ic {
+  color: var(--danger);
+  flex-shrink: 0;
+}
+
+.modal-body {
+  font-size: var(--fs-md);
+  color: var(--text-2);
+  line-height: 1.6;
+  white-space: pre-line; /* body 里的 \n 生效 */
+}
+
+.modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  margin-top: 2px;
+}
+
+/* 危险确认钮 (删除/清除类) */
+button.danger-primary {
+  background: var(--danger);
+  border-color: var(--danger);
+  color: var(--on-accent);
+}
+
+button.danger-primary:hover:not(:disabled) {
+  background: var(--danger);
+  border-color: var(--danger);
+  color: var(--on-accent);
+  filter: brightness(1.08);
+}
+
+@keyframes modal-in {
+  from { opacity: 0; transform: translateY(8px) scale(0.98); }
+}
+
+/* ---------- 按钮 busy 态 (withLoading) ---------- */
+.btn-busy {
+  cursor: wait;
+}
+
+.btn-busy::after {
+  content: "";
+  display: inline-block;
+  width: 12px;
+  height: 12px;
+  margin-left: 6px;
+  vertical-align: -2px;
+  border: 2px solid currentColor;
+  border-top-color: transparent;
+  border-radius: 50%;
+  animation: spin 0.7s linear infinite;
+}
+
+/* 图标方形钮过窄, busy 只禁用不显 spinner */
+.hb-toggle.btn-busy::after {
+  display: none;
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+/* 图标 + 文字的行内动作钮 (验证外网/部署 proxy) */
+.tunnel-actions button {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}

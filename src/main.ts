@@ -2,6 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { icon, type IconName } from "./icons";
 import { initTheme } from "./theme";
+import { toast, dialog, withLoading } from "./ui";
 
 // ---------- 类型 (与 core serde camelCase 对应) ----------
 interface Profile {
@@ -340,8 +341,10 @@ function renderTunnelRows(container: HTMLElement, list: TunnelDto[]) {
     btnTrust.title = "服务器指纹变更被拒后, 清除记录并重连 (仅服务器确已重装/更换时使用)";
     const btnVerify = mkBtn("验证外网");
     btnVerify.title = "在服务器上经隧道测试访问外网 (google)";
+    btnVerify.innerHTML = `${icon("globe", 13)}<span class="btn-label">验证外网</span>`;
     const btnDeploy = mkBtn("部署 proxy");
     btnDeploy.title = "部署 proxy 命令, 服务器上可 'proxy curl ...' 走隧道";
+    btnDeploy.innerHTML = `${icon("terminal", 13)}<span class="btn-label">部署 proxy</span>`;
     const btnScenario = mkBtn("存为场景");
     btnScenario.title = "把这条隧道的形态/参数存为「我的场景」, 新建隧道时复用";
     const btnDelete = mkBtn("删除", "danger");
@@ -444,7 +447,7 @@ function renderTunnelRows(container: HTMLElement, list: TunnelDto[]) {
         pwInput.focus();
         return;
       }
-      await doStart(pwInput.value || null);
+      await withLoading(pwBtn, () => doStart(pwInput.value || null), "连接中...");
     });
     pwInput.addEventListener("keydown", (e) => {
       if (e.key === "Enter") pwBtn.click();
@@ -470,12 +473,13 @@ function renderTunnelRows(container: HTMLElement, list: TunnelDto[]) {
         appendLog(t.id, "❌ 隧道关联的档案缺失, 无法定位指纹记录");
         return;
       }
-      if (
-        !confirm(
-          `清除 ${profile.host}:${profile.port} 的旧指纹并重连?\n仅当服务器确已重装/更换时继续 —— 否则可能是中间人攻击。`
-        )
-      )
-        return;
+      const ok = await dialog({
+        title: "信任新指纹并重连?",
+        body: `将清除 ${profile.host}:${profile.port} 的旧指纹记录, 重连后重新记忆当前指纹。\n仅当服务器确已重装/更换时继续 —— 否则可能是中间人攻击。`,
+        confirmText: "信任并重连",
+        danger: true,
+      });
+      if (!ok) return;
       try {
         await invoke("known_hosts_forget", { host: profile.host, port: profile.port });
         appendLog(t.id, `已清除 ${profile.host}:${profile.port} 的指纹记录, 重连后将重新记忆当前指纹`);
@@ -494,25 +498,34 @@ function renderTunnelRows(container: HTMLElement, list: TunnelDto[]) {
       }
       const pass = passwords.get(t.profileId) ?? null;
       const btn = cmd === "verify_remote_tunnel" ? btnVerify : btnDeploy;
-      btn.disabled = true;
-      const label = btn.textContent;
-      btn.textContent = "执行中...";
-      try {
-        await invoke<string>(cmd, { id: t.id, password: pass || null });
-        // 输出经 tunnel-log 事件回流行内日志, 此处不重复
-      } catch (err) {
-        appendLog(t.id, `❌ ${err}`);
-      } finally {
-        btn.textContent = label!;
-        const cur = currentTunnel(t.id);
-        if (cur) updateRow(cur);
-      }
+      // busy 态只改 .btn-label 文案 (SVG 不丢), 完成后按最新状态刷新按钮可用性
+      await withLoading(
+        btn,
+        async () => {
+          try {
+            await invoke<string>(cmd, { id: t.id, password: pass || null });
+            // 输出经 tunnel-log 事件回流行内日志, 此处不重复
+          } catch (err) {
+            appendLog(t.id, `❌ ${err}`);
+          }
+        },
+        "执行中..."
+      );
+      const cur = currentTunnel(t.id);
+      if (cur) updateRow(cur);
     };
     btnVerify.addEventListener("click", () => runAction("verify_remote_tunnel"));
     btnDeploy.addEventListener("click", () => runAction("deploy_wrapper"));
     btnScenario.addEventListener("click", async () => {
-      const name = prompt("保存为我的场景, 名称:", t.name)?.trim();
-      if (!name) return;
+      const r = await dialog({
+        title: "存为我的场景",
+        body: "以当前隧道的形态与参数保存, 新建隧道时直接复用。",
+        input: { value: t.name, placeholder: "场景名称" },
+        confirmText: "保存",
+      });
+      // 确认但空名视为取消 (原 prompt 语义)
+      if (typeof r !== "string" || !r.trim()) return;
+      const name = r.trim();
       try {
         scenarios = await invoke<Scenario[]>("scenario_save", {
           scenario: {
@@ -529,7 +542,13 @@ function renderTunnelRows(container: HTMLElement, list: TunnelDto[]) {
       }
     });
     btnDelete.addEventListener("click", async () => {
-      if (!confirm(`删除隧道「${t.name}」? (运行中会先停止)`)) return;
+      const ok = await dialog({
+        title: `删除隧道「${t.name}」?`,
+        body: "运行中的隧道会先停止。",
+        confirmText: "删除",
+        danger: true,
+      });
+      if (!ok) return;
       try {
         tunnels = await invoke<TunnelDto[]>("tunnel_delete", { id: t.id });
         renderHosts();
@@ -659,8 +678,8 @@ function renderHosts() {
     toggle.addEventListener("click", (e) => {
       e.stopPropagation();
       selectProfile(p.id);
-      if (anyActive) stopAllForProfile(p);
-      else startAllForProfile(p);
+      // busy 期间防双击重复启停 (状态点即时反馈, 图标钮不显 spinner —— CSS 抑制)
+      withLoading(toggle, () => (anyActive ? stopAllForProfile(p) : startAllForProfile(p)));
     });
 
     block.append(name, addr, count, toggle);
@@ -769,10 +788,16 @@ function renderServerDetail(showPwBar = false) {
   delBtn.className = "danger";
   delBtn.addEventListener("click", async () => {
     const used = tunnels.filter((t) => t.profileId === p.id);
-    const warn = used.length
-      ? `\n注意: 有 ${used.length} 条隧道关联此服务器 (${used.map((t) => t.name).join(", ")}), 删除后这些隧道将无法启动`
-      : "";
-    if (!confirm(`删除服务器「${p.name}」?${warn}`)) return;
+    const body = used.length
+      ? `有 ${used.length} 条隧道关联此服务器 (${used.map((t) => t.name).join(", ")}), 删除后这些隧道将无法启动。`
+      : undefined;
+    const ok = await dialog({
+      title: `删除服务器「${p.name}」?`,
+      body,
+      confirmText: "删除",
+      danger: true,
+    });
+    if (!ok) return;
     try {
       profiles = await invoke<Profile[]>("delete_profile", { id: p.id });
       passwords.delete(p.id);
@@ -780,7 +805,7 @@ function renderServerDetail(showPwBar = false) {
       renderHosts();
       setDetailView("empty");
     } catch (err) {
-      alert(`删除失败: ${err}`);
+      toast(`删除失败: ${err}`, "error");
     }
   });
   btns.append(editBtn, delBtn);
@@ -856,17 +881,18 @@ async function fillFingerprint(p: Profile) {
     btn.textContent = "清除";
     btn.className = "danger";
     btn.addEventListener("click", async () => {
-      if (
-        !confirm(
-          `清除 ${p.host}:${p.port} 的指纹记录?\n下次连接将重新记住当前指纹 (仅服务器确已变更时操作)。`
-        )
-      )
-        return;
+      const ok = await dialog({
+        title: `清除 ${p.host}:${p.port} 的指纹记录?`,
+        body: "下次连接将重新记住当前指纹 (仅服务器确已变更时操作)。",
+        confirmText: "清除",
+        danger: true,
+      });
+      if (!ok) return;
       try {
         await invoke("known_hosts_forget", { host: p.host, port: p.port });
         fillFingerprint(p);
       } catch (err) {
-        alert(`清除失败: ${err}`);
+        toast(`清除失败: ${err}`, "error");
       }
     });
     box.append(btn);
@@ -900,19 +926,28 @@ el<HTMLFormElement>("server-form").addEventListener("submit", async (e) => {
   const shareSel = el<HTMLSelectElement>("profile-share").value;
   const shareConnection = shareSel === "" ? null : shareSel === "on";
   if (!name || !host || !username) {
-    alert("请填写名称、地址和用户名");
+    toast("请填写名称、地址和用户名", "info");
     return;
   }
-  try {
-    const id = el<HTMLInputElement>("profile-id").value || crypto.randomUUID();
-    profiles = await invoke<Profile[]>("save_profile", {
-      profile: { id, name, host, port, username, identityFile: keyPath || null, shareConnection },
-    });
-    selectProfile(id); // 保存后选中并进入详情
-    renderCurrentPage(); // 已有隧道摘要里的档案名同步
-  } catch (err) {
-    alert(`保存失败: ${err}`);
-  }
+  const btn =
+    (e.submitter as HTMLButtonElement | null) ??
+    el<HTMLFormElement>("server-form").querySelector<HTMLButtonElement>('button[type="submit"]');
+  await withLoading(
+    btn,
+    async () => {
+      try {
+        const id = el<HTMLInputElement>("profile-id").value || crypto.randomUUID();
+        profiles = await invoke<Profile[]>("save_profile", {
+          profile: { id, name, host, port, username, identityFile: keyPath || null, shareConnection },
+        });
+        selectProfile(id); // 保存后选中并进入详情
+        renderCurrentPage(); // 已有隧道摘要里的档案名同步
+      } catch (err) {
+        toast(`保存失败: ${err}`, "error");
+      }
+    },
+    "保存中..."
+  );
 });
 
 el<HTMLButtonElement>("sf-back").addEventListener("click", () =>
@@ -929,7 +964,7 @@ async function loadScenarios() {
 
 async function openScenarioPick() {
   if (!selectedProfileId) {
-    alert("请先选择服务器");
+    toast("请先选择服务器", "info");
     return;
   }
   setDetailView("scenario-pick");
@@ -957,7 +992,7 @@ async function openScenarioPick() {
           defaultName: preset.id === "custom" ? "" : preset.name,
         });
       } catch (err) {
-        alert(String(err));
+        toast(String(err), "error");
       }
     });
     presetEl.append(card);
@@ -980,12 +1015,17 @@ async function openScenarioPick() {
     del.title = "删除此场景";
     del.addEventListener("click", async (e) => {
       e.stopPropagation();
-      if (!confirm(`删除场景「${s.name}」?`)) return;
+      const ok = await dialog({
+        title: `删除场景「${s.name}」?`,
+        confirmText: "删除",
+        danger: true,
+      });
+      if (!ok) return;
       try {
         scenarios = await invoke<Scenario[]>("scenario_delete", { id: s.id });
         openScenarioPick(); // 重渲染卡片
       } catch (err) {
-        alert(`删除失败: ${err}`);
+        toast(`删除失败: ${err}`, "error");
       }
     });
     card.append(del);
@@ -1002,7 +1042,7 @@ async function openScenarioPick() {
           defaultName: s.name,
         });
       } catch (err) {
-        alert(String(err));
+        toast(String(err), "error");
       }
     });
     scEl.append(card);
@@ -1266,7 +1306,7 @@ function wzApplyToSpec(spec: TunnelSpec): string | null {
 
 el<HTMLButtonElement>("tf-back").addEventListener("click", () => openScenarioPick());
 
-async function submitTunnelForm(start: boolean) {
+async function submitTunnelForm(start: boolean, btn?: HTMLButtonElement | null) {
   if (!wzSpec || !selectedProfileId) return;
   const errEl = el<HTMLDivElement>("wz-error");
   errEl.textContent = "";
@@ -1290,48 +1330,57 @@ async function submitTunnelForm(start: boolean) {
     return;
   }
   spec.policy = { ...spec.policy, auto: el<HTMLInputElement>("wz-auto").checked };
-  try {
-    tunnels = await invoke<TunnelDto[]>("tunnel_create", { spec }); // 校验失败会抛错
-  } catch (err) {
-    errEl.textContent = String(err);
-    return;
-  }
-  // 存为我的场景 (可选)
-  if (el<HTMLInputElement>("wz-save-scenario").checked) {
-    const scenarioName =
-      el<HTMLInputElement>("wz-scenario-name").value.trim() || name;
-    try {
-      scenarios = await invoke<Scenario[]>("scenario_save", {
-        scenario: {
-          id: crypto.randomUUID(),
-          name: scenarioName,
-          description: "",
-          kind: spec.kind,
-          backend: spec.backend,
-        },
-      });
-    } catch (err) {
-      appendLog(spec.id, `❌ 保存场景失败: ${err}`);
-    }
-  }
-  if (start) {
-    const pass = password || cached || null;
-    if (password) passwords.set(profileId, password);
-    try {
-      await invoke("tunnel_start", { id: spec.id, password: pass });
-    } catch (err) {
-      appendLog(spec.id, `❌ ${err}`);
-    }
-  }
-  await refreshTunnels();
-  setDetailView("detail");
+  await withLoading(
+    btn,
+    async () => {
+      try {
+        tunnels = await invoke<TunnelDto[]>("tunnel_create", { spec }); // 校验失败会抛错
+      } catch (err) {
+        errEl.textContent = String(err);
+        return;
+      }
+      // 存为我的场景 (可选)
+      if (el<HTMLInputElement>("wz-save-scenario").checked) {
+        const scenarioName =
+          el<HTMLInputElement>("wz-scenario-name").value.trim() || name;
+        try {
+          scenarios = await invoke<Scenario[]>("scenario_save", {
+            scenario: {
+              id: crypto.randomUUID(),
+              name: scenarioName,
+              description: "",
+              kind: spec.kind,
+              backend: spec.backend,
+            },
+          });
+          toast(`已保存场景「${scenarioName}」`, "success");
+        } catch (err) {
+          appendLog(spec.id, `❌ 保存场景失败: ${err}`);
+        }
+      }
+      if (start) {
+        const pass = password || cached || null;
+        if (password) passwords.set(profileId, password);
+        try {
+          await invoke("tunnel_start", { id: spec.id, password: pass });
+        } catch (err) {
+          appendLog(spec.id, `❌ ${err}`);
+        }
+      }
+      await refreshTunnels();
+      setDetailView("detail");
+    },
+    start ? "启动中..." : "保存中..."
+  );
 }
 
 el<HTMLFormElement>("tunnel-form").addEventListener("submit", (e) => {
   e.preventDefault();
-  submitTunnelForm(true);
+  submitTunnelForm(true, e.submitter as HTMLButtonElement | null);
 });
-el<HTMLButtonElement>("wz-save").addEventListener("click", () => submitTunnelForm(false));
+el<HTMLButtonElement>("wz-save").addEventListener("click", (e) =>
+  submitTunnelForm(false, e.currentTarget as HTMLButtonElement)
+);
 
 // ---------- 分层默认值 (档案层) ----------
 async function loadDefaults() {
@@ -1348,35 +1397,36 @@ async function loadDefaults() {
   }
 }
 
-el<HTMLButtonElement>("def-save").addEventListener("click", async () => {
-  const btn = el<HTMLButtonElement>("def-save");
-  btn.disabled = true;
-  try {
-    const d = await invoke<Defaults>("profile_defaults_get");
-    const base = d.reconnect ?? DEFAULT_POLICY;
-    const policy: Policy = {
-      ...base,
-      auto: el<HTMLInputElement>("def-auto").checked,
-      fastRetries: Number(el<HTMLInputElement>("def-fast").value),
-      maxBackoff: Number(el<HTMLInputElement>("def-max").value),
-    };
-    const maxSessions = Number(el<HTMLInputElement>("def-maxsessions").value);
-    await invoke("profile_defaults_save", {
-      defaults: {
-        connectTimeoutSecs: d.connectTimeoutSecs ?? null,
-        reconnect: policy,
-        shareConnection: el<HTMLInputElement>("def-share").checked,
-        maxSessions: Number.isFinite(maxSessions) && maxSessions > 0 ? maxSessions : null,
-      },
-    });
-    btn.textContent = "已保存 ✓";
-    setTimeout(() => (btn.textContent = "保存默认值"), 1500);
-  } catch (err) {
-    alert(`保存失败: ${err}`);
-  } finally {
-    btn.disabled = false;
-  }
-});
+el<HTMLButtonElement>("def-save").addEventListener("click", (e) =>
+  withLoading(
+    e.currentTarget as HTMLButtonElement,
+    async () => {
+      try {
+        const d = await invoke<Defaults>("profile_defaults_get");
+        const base = d.reconnect ?? DEFAULT_POLICY;
+        const policy: Policy = {
+          ...base,
+          auto: el<HTMLInputElement>("def-auto").checked,
+          fastRetries: Number(el<HTMLInputElement>("def-fast").value),
+          maxBackoff: Number(el<HTMLInputElement>("def-max").value),
+        };
+        const maxSessions = Number(el<HTMLInputElement>("def-maxsessions").value);
+        await invoke("profile_defaults_save", {
+          defaults: {
+            connectTimeoutSecs: d.connectTimeoutSecs ?? null,
+            reconnect: policy,
+            shareConnection: el<HTMLInputElement>("def-share").checked,
+            maxSessions: Number.isFinite(maxSessions) && maxSessions > 0 ? maxSessions : null,
+          },
+        });
+        toast("默认值已保存", "success");
+      } catch (err) {
+        toast(`保存失败: ${err}`, "error");
+      }
+    },
+    "保存中..."
+  )
+);
 
 // ---------- 开机自启 (经后端命令包装 tauri-plugin-autostart) ----------
 el<HTMLInputElement>("autostart").addEventListener("change", async () => {
@@ -1384,7 +1434,7 @@ el<HTMLInputElement>("autostart").addEventListener("change", async () => {
   try {
     await invoke("autostart_set", { enabled: cb.checked });
   } catch (err) {
-    alert(`设置失败: ${err}`);
+    toast(`设置失败: ${err}`, "error");
     cb.checked = !cb.checked;
   }
 });

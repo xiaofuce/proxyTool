@@ -14,6 +14,12 @@ import x from "lucide-static/icons/x.svg?raw";
 import sun from "lucide-static/icons/sun.svg?raw";
 import moon from "lucide-static/icons/moon.svg?raw";
 import monitor from "lucide-static/icons/monitor.svg?raw";
+import globe from "lucide-static/icons/globe.svg?raw";
+import terminal from "lucide-static/icons/terminal.svg?raw";
+import info from "lucide-static/icons/info.svg?raw";
+import check from "lucide-static/icons/check.svg?raw";
+import circleAlert from "lucide-static/icons/circle-alert.svg?raw";
+import triangleAlert from "lucide-static/icons/triangle-alert.svg?raw";
 
 const ICONS = {
   server,
@@ -29,6 +35,12 @@ const ICONS = {
   sun,
   moon,
   monitor,
+  globe,
+  terminal,
+  info,
+  check,
+  "circle-alert": circleAlert,
+  "triangle-alert": triangleAlert,
 } as const;
 
 export type IconName = keyof typeof ICONS;
