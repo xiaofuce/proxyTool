@@ -876,7 +876,7 @@ function renderHosts() {
     nameText.textContent = p.name;
     name.append(dot, nameText);
 
-    // 行 2: 地址 + 运行统计 pill (右对齐; 运行>0 亮绿)
+    // 行 2: 地址 + 右槽 (运行 pill ⇄ hover 换出 编辑/删除 图标钮, 同位交叉淡换)
     const meta = document.createElement("div");
     meta.className = "hb-meta";
     const addr = document.createElement("div");
@@ -890,7 +890,35 @@ function renderHosts() {
       agg.total === 0 ? "无隧道" : `${agg.running}/${agg.total} 运行`;
     pill.title =
       agg.total === 0 ? "还没有隧道" : `${agg.running} 条运行 / 共 ${agg.total} 条`;
-    meta.append(addr, pill);
+    const side = document.createElement("div");
+    side.className = "hb-side";
+    const acts = document.createElement("div");
+    acts.className = "hb-acts";
+    const editBtn = document.createElement("button");
+    editBtn.type = "button";
+    editBtn.className = "hb-act";
+    editBtn.title = "编辑服务器";
+    editBtn.setAttribute("aria-label", `编辑服务器 ${p.name}`);
+    editBtn.innerHTML = icon("pencil", 13);
+    editBtn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      selectProfile(p.id);
+      openServerForm(p);
+    });
+    const delBtn = document.createElement("button");
+    delBtn.type = "button";
+    delBtn.className = "hb-act danger";
+    delBtn.title = "删除服务器";
+    delBtn.setAttribute("aria-label", `删除服务器 ${p.name}`);
+    delBtn.innerHTML = icon("trash-2", 13);
+    delBtn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      selectProfile(p.id);
+      void deleteProfileFlow(p);
+    });
+    acts.append(editBtn, delBtn);
+    side.append(pill, acts);
+    meta.append(addr, side);
 
     // ▶ 一键启动 enabled 隧道 / ■ 全部停止 (右上角圆形钮)
     const toggle = document.createElement("button");
@@ -990,6 +1018,30 @@ function setDetailView(view: DetailView) {
 }
 
 // ---------- 服务器详情 ----------
+/** 服务器删除 (块上删除图标钮): 确认对话框 → delete_profile → 回空态 */
+async function deleteProfileFlow(p: Profile) {
+  const used = tunnels.filter((t) => t.profileId === p.id);
+  const body = used.length
+    ? `有 ${used.length} 条隧道关联此服务器 (${used.map((t) => t.name).join(", ")}), 删除后这些隧道将无法启动。`
+    : undefined;
+  const ok = await dialog({
+    title: `删除服务器「${p.name}」?`,
+    body,
+    confirmText: "删除",
+    danger: true,
+  });
+  if (!ok) return;
+  try {
+    profiles = await invoke<Profile[]>("delete_profile", { id: p.id });
+    passwords.delete(p.id);
+    selectedProfileId = null;
+    renderHosts();
+    setDetailView("empty");
+  } catch (err) {
+    toast(`删除失败: ${err}`, "error");
+  }
+}
+
 /** renderServerDetail(showPwBar): 一键启动的密码条显隐 */
 function renderServerDetail(showPwBar = false) {
   const p = selectedProfile();
@@ -1005,41 +1057,7 @@ function renderServerDetail(showPwBar = false) {
   title.innerHTML =
     `<strong>${escapeHtml(p.name)}</strong>` +
     `<span>${escapeHtml(p.host)}:${p.port} · ${escapeHtml(p.username)} · ${p.identityFile ? icon("key", 12) + " 密钥认证" : "密码认证"}</span>`;
-
-  const btns = document.createElement("div");
-  btns.className = "actions";
-  const editBtn = document.createElement("button");
-  editBtn.type = "button";
-  editBtn.textContent = "编辑";
-  editBtn.addEventListener("click", () => openServerForm(p));
-  const delBtn = document.createElement("button");
-  delBtn.type = "button";
-  delBtn.textContent = "删除";
-  delBtn.className = "danger";
-  delBtn.addEventListener("click", async () => {
-    const used = tunnels.filter((t) => t.profileId === p.id);
-    const body = used.length
-      ? `有 ${used.length} 条隧道关联此服务器 (${used.map((t) => t.name).join(", ")}), 删除后这些隧道将无法启动。`
-      : undefined;
-    const ok = await dialog({
-      title: `删除服务器「${p.name}」?`,
-      body,
-      confirmText: "删除",
-      danger: true,
-    });
-    if (!ok) return;
-    try {
-      profiles = await invoke<Profile[]>("delete_profile", { id: p.id });
-      passwords.delete(p.id);
-      selectedProfileId = null;
-      renderHosts();
-      setDetailView("empty");
-    } catch (err) {
-      toast(`删除失败: ${err}`, "error");
-    }
-  });
-  btns.append(editBtn, delBtn);
-  head.append(title, btns);
+  head.append(title);
 
   // 一键启动密码条 (密码档案首次 ▶ 时出现)
   const pwbar = el<HTMLDivElement>("pd-pwbar");

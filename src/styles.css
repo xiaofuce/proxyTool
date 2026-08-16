@@ -578,6 +578,13 @@ button.danger:hover:not(:disabled) {
   margin-bottom: 12px;
 }
 
+/* 服务器详情: 服务器信息 (pd-head) 与隧道区之间的分隔线 */
+#server-detail .list-head {
+  border-top: 1px solid var(--border);
+  padding-top: 14px;
+  margin-top: 2px;
+}
+
 .list-head .hint {
   margin: 0;
 }
@@ -868,6 +875,66 @@ button.danger:hover:not(:disabled) {
 .hb-pill.running {
   background: color-mix(in srgb, var(--success) 12%, transparent);
   color: var(--success);
+}
+
+/* 右槽: pill 与 hover 编辑/删除钮同格交叉淡换 (focus-within 兼键盘) */
+.hb-side {
+  position: relative;
+  display: grid;
+  justify-items: end;
+  flex-shrink: 0;
+}
+
+.hb-pill,
+.hb-acts {
+  grid-area: 1 / 1;
+}
+
+.hb-pill {
+  transition: opacity 0.12s ease;
+}
+
+.hb-acts {
+  display: flex;
+  gap: 2px;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.12s ease;
+}
+
+.host-block:hover .hb-acts,
+.host-block:focus-within .hb-acts {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.host-block:hover .hb-pill,
+.host-block:focus-within .hb-pill {
+  opacity: 0;
+}
+
+/* 块级小图标钮 (编辑/删除): 幽灵态, 删除钮 hover 红 */
+.hb-act {
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  background: transparent;
+  color: var(--muted);
+  border-radius: var(--radius-sm);
+}
+
+.hb-act:hover {
+  background: var(--surface-2);
+  color: var(--text);
+}
+
+.hb-act.danger:hover {
+  background: color-mix(in srgb, var(--danger) 12%, transparent);
+  color: var(--danger);
 }
 
 .hb-status {

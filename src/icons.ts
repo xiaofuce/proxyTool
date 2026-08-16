@@ -26,6 +26,7 @@ import shieldCheck from "lucide-static/icons/shield-check.svg?raw";
 import bookmark from "lucide-static/icons/bookmark.svg?raw";
 import power from "lucide-static/icons/power.svg?raw";
 import trash2 from "lucide-static/icons/trash-2.svg?raw";
+import pencil from "lucide-static/icons/pencil.svg?raw";
 import copy from "lucide-static/icons/copy.svg?raw";
 import eraser from "lucide-static/icons/eraser.svg?raw";
 import waypoints from "lucide-static/icons/waypoints.svg?raw";
@@ -56,6 +57,7 @@ const ICONS = {
   bookmark,
   power,
   "trash-2": trash2,
+  pencil,
   copy,
   eraser,
   waypoints,
