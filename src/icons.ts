@@ -30,6 +30,8 @@ import pencil from "lucide-static/icons/pencil.svg?raw";
 import copy from "lucide-static/icons/copy.svg?raw";
 import eraser from "lucide-static/icons/eraser.svg?raw";
 import waypoints from "lucide-static/icons/waypoints.svg?raw";
+import arrowRight from "lucide-static/icons/arrow-right.svg?raw";
+import circleHelp from "lucide-static/icons/circle-help.svg?raw";
 
 const ICONS = {
   server,
@@ -61,6 +63,8 @@ const ICONS = {
   copy,
   eraser,
   waypoints,
+  "arrow-right": arrowRight,
+  "circle-help": circleHelp,
 } as const;
 
 export type IconName = keyof typeof ICONS;

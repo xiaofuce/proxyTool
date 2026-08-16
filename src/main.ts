@@ -1019,7 +1019,7 @@ function setDetailView(view: DetailView) {
   if (view === "detail") renderServerDetail();
 }
 
-// ---------- 工具: 隧道命令生成器 (命令在服务器 A 上执行, 经 SSH 到目标 B) ----------
+// ---------- 命令生成页: 隧道命令生成器 (命令在服务器 A 上执行, 经 SSH 到目标 B) ----------
 
 /** 按当前表单状态生成 ssh / autossh 命令 (纯字符串, 不碰引擎) */
 function cmdGenBuild(): { ssh: string; autossh: string; hint: string } {
@@ -1060,9 +1060,46 @@ function cmdGenRegen() {
   el<HTMLPreElement>("cg-ssh").textContent = ssh;
   el<HTMLPreElement>("cg-autossh").textContent = autossh;
   el<HTMLDivElement>("cg-hint").textContent = hint;
-  const kind = document.querySelector<HTMLInputElement>("input[name=cg-kind]:checked")?.value;
+  const kind = (document.querySelector<HTMLInputElement>("input[name=cg-kind]:checked")?.value ?? "local") as
+    "local" | "reverse" | "dynamic";
   el<HTMLElement>("cg-target-wrap").classList.toggle("hidden", kind === "dynamic");
-  // 动态形态下目标地址标签语义不同, 恢复可见时标签正确 (local 固定文案)
+  renderCmdFlow(kind, {
+    host: el<HTMLInputElement>("cg-host").value.trim(),
+    listen: el<HTMLInputElement>("cg-listen").value.trim() || "1080",
+    thost: el<HTMLInputElement>("cg-thost").value.trim() || "127.0.0.1",
+    tport: el<HTMLInputElement>("cg-tport").value.trim() || "8080",
+  });
+}
+
+/** 流程图示: 三节点 (在哪监听 → SSH → 流量去向), 按形态换序换文案 */
+function renderCmdFlow(
+  kind: "local" | "reverse" | "dynamic",
+  v: { host: string; listen: string; thost: string; tport: string },
+) {
+  const node = (ic: IconName, title: string, sub: string) =>
+    `<div class="flow-node"><span class="flow-ic">${icon(ic, 18)}</span><div class="flow-tx"><strong>${escapeHtml(title)}</strong><span>${escapeHtml(sub)}</span></div></div>`;
+  const arrow = (lab: string) =>
+    `<div class="flow-arrow">${icon("arrow-right", 14)}<span>${escapeHtml(lab)}</span></div>`;
+  const bTxt = escapeHtml(v.host || "B");
+  const target = `${v.thost}:${v.tport}`;
+  let html: string;
+  if (kind === "local") {
+    html =
+      node("monitor", "A · 命令所在机", `监听 :${v.listen}`) + arrow("SSH") +
+      node("server", "B · 目标服务器", bTxt) + arrow("代连") +
+      node("globe", target, "相对 B 解析");
+  } else if (kind === "reverse") {
+    html =
+      node("server", "B · 目标服务器", `${bTxt} · 监听 :${v.listen}`) + arrow("SSH") +
+      node("monitor", "A · 命令所在机", "你在这台机器执行命令") + arrow("代连") +
+      node("globe", target, "相对 A 解析");
+  } else {
+    html =
+      node("monitor", "A · 命令所在机", `SOCKS5 :${v.listen}`) + arrow("SSH") +
+      node("server", "B · 目标服务器", bTxt) + arrow("代连") +
+      node("globe", "任意目标", "经 B 代连");
+  }
+  el<HTMLElement>("cg-flow").innerHTML = html;
 }
 
 /** 档案下拉选项刷新 (renderHosts 后调用 —— profiles 变化的汇聚点) */
@@ -1127,6 +1164,15 @@ function initCmdGen() {
   cmdGenRegen();
 }
 
+/** 帮助页: CTA 直达「新建服务器」表单 */
+function initHelp() {
+  el<HTMLButtonElement>("help-new-server").addEventListener("click", () => {
+    showPage("servers");
+    selectProfile(null);
+    openServerForm(null);
+  });
+}
+
 
 // ---------- 服务器详情 ----------
 /** 服务器删除 (块上删除图标钮): 确认对话框 → delete_profile → 回空态 */
@@ -1171,7 +1217,7 @@ function renderServerDetail(showPwBar = false) {
   const genBtn = document.createElement("button");
   genBtn.type = "button";
   genBtn.className = "pd-gen";
-  genBtn.title = "为此服务器生成隧道命令 (工具页)";
+  genBtn.title = "为此服务器生成隧道命令 (命令生成页)";
   genBtn.innerHTML = `${icon("terminal", 14)}<span class="btn-label">生成命令</span>`;
   genBtn.addEventListener("click", () => jumpToCmdGen(p));
   head.append(title, genBtn);
@@ -1851,6 +1897,7 @@ function applyStaticIcons() {
     servers: "server",
     tools: "terminal",
     settings: "settings",
+    help: "circle-help",
   };
   for (const b of document.querySelectorAll<HTMLElement>(".nav-item")) {
     const slot = b.querySelector(".nav-icon");
@@ -1872,11 +1919,13 @@ function applyStaticIcons() {
 applyStaticIcons();
 initAppearance();
 initCmdGen();
+initHelp();
 (async () => {
   profiles = await invoke<Profile[]>("list_profiles");
   tunnels = await invoke<TunnelDto[]>("tunnels_list");
   await loadDefaults();
   await loadAutostart();
   renderHosts();
-  showPage("servers");
+  // 首次使用软引导: 一台服务器都没有 → 落在帮助页
+  showPage(profiles.length === 0 ? "help" : "servers");
 })().catch((e) => console.error("初始化失败", e));

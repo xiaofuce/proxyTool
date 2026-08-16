@@ -18,7 +18,7 @@
     </script>
     <link rel="stylesheet" href="/src/styles.css" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>proxyTool — SSH 隧道工具</title>
+    <title>proxyTool — 本机↔远程 SSH 隧道</title>
     <script type="module" src="/src/main.ts" defer></script>
   </head>
 
@@ -28,17 +28,20 @@
       <aside class="sidebar">
         <div class="brand">
           <div class="brand-name">proxyTool</div>
-          <div class="brand-sub">SSH 隧道工具</div>
+          <div class="brand-sub">本机 ↔ 远程 · SSH 隧道</div>
         </div>
         <nav class="nav">
           <button class="nav-item active" data-page="servers">
             <span class="nav-icon"></span><span class="nav-label">服务器</span>
           </button>
           <button class="nav-item" data-page="tools">
-            <span class="nav-icon"></span><span class="nav-label">工具</span>
+            <span class="nav-icon"></span><span class="nav-label">命令生成</span>
           </button>
           <button class="nav-item" data-page="settings">
             <span class="nav-icon"></span><span class="nav-label">设置</span>
+          </button>
+          <button class="nav-item" data-page="help">
+            <span class="nav-icon"></span><span class="nav-label">帮助</span>
           </button>
         </nav>
         <div class="sidebar-foot">密码仅存内存 · 不落盘</div>
@@ -49,7 +52,7 @@
         <section class="hosts-col page" data-page="servers">
           <header class="page-head">
             <h2>服务器</h2>
-            <p>点选服务器管理其隧道；块上的播放键一键启动</p>
+            <p>管理你的<b>本机 ↔ 远程服务器</b> SSH 隧道 —— 点选服务器查看详情，块上的播放键一键启动</p>
           </header>
           <div id="host-grid"></div>
         </section>
@@ -133,15 +136,15 @@
             </div>
           </section>
 
-          <!-- 工具: 隧道命令生成器 (服务器到服务器, 命令在服务器上执行) -->
+          <!-- 命令生成: 服务器↔服务器隧道命令 (在服务器上执行) -->
           <section class="page" data-page="tools">
             <header class="page-head">
-              <h2>工具</h2>
-              <p>生成在服务器上执行的隧道命令 —— 服务器 ↔ 服务器，不经过本机</p>
+              <h2>命令生成</h2>
+              <p>为<b>服务器 ↔ 服务器</b>的隧道生成命令 —— 在服务器 A 上执行、经 SSH 到目标 B，不经过本机</p>
             </header>
 
             <div class="card">
-              <h3>隧道命令生成器 <span class="card-sub">在服务器 A 上执行，经 SSH 连到目标服务器 B</span></h3>
+              <h3>选参数</h3>
 
               <label>
                 <span>SSH 目标 (B)</span>
@@ -164,8 +167,8 @@
 
               <div class="field-title">隧道形态</div>
               <div class="seg" id="cg-kind">
-                <label class="seg-item"><input type="radio" name="cg-kind" value="local" checked /><span>本地 -L · 访问 B 侧服务</span></label>
-                <label class="seg-item"><input type="radio" name="cg-kind" value="reverse" /><span>反向 -R · 暴露 A 侧服务</span></label>
+                <label class="seg-item"><input type="radio" name="cg-kind" value="local" checked /><span>本地 -L · 访问 B 侧</span></label>
+                <label class="seg-item"><input type="radio" name="cg-kind" value="reverse" /><span>反向 -R · 暴露 A 侧</span></label>
                 <label class="seg-item"><input type="radio" name="cg-kind" value="dynamic" /><span>动态 -D · SOCKS5</span></label>
               </div>
 
@@ -176,7 +179,7 @@
                 </label>
                 <span id="cg-target-wrap" class="cg-target">
                   <label>
-                    <span>目标地址 (相对 B 解析)</span>
+                    <span id="cg-tlabel">目标地址</span>
                     <input id="cg-thost" type="text" value="127.0.0.1" />
                   </label>
                   <label>
@@ -189,7 +192,11 @@
                 <input type="checkbox" id="cg-bind" />
                 <span>监听 0.0.0.0（同网段其他机器可连）</span>
               </label>
+            </div>
 
+            <div class="card">
+              <h3>生成的命令</h3>
+              <div class="flow" id="cg-flow"></div>
               <div class="hint tight" id="cg-hint"></div>
 
               <div class="cmd-block">
@@ -198,6 +205,12 @@
                   <button type="button" class="cmd-copy" data-cmd="ssh">复制</button>
                 </div>
                 <pre class="cmd-text" id="cg-ssh"></pre>
+                <dl class="cmd-notes">
+                  <dt>-N</dt><dd>只转发端口，不打开远程 shell</dd>
+                  <dt>-L / -R / -D</dt><dd>转发方向，见上面图示</dd>
+                  <dt>ExitOnForwardFailure=yes</dt><dd>端口转发没建立成功就退出，避免「连着但没转发」</dd>
+                  <dt>ServerAliveInterval / CountMax</dt><dd>每 30 秒探测一次，连续 3 次无响应判定断线</dd>
+                </dl>
               </div>
               <div class="cmd-block">
                 <div class="cmd-head">
@@ -205,11 +218,82 @@
                   <button type="button" class="cmd-copy" data-cmd="autossh">复制</button>
                 </div>
                 <pre class="cmd-text" id="cg-autossh"></pre>
+                <dl class="cmd-notes">
+                  <dt>autossh</dt><dd>断线自动重连的 ssh 包装器（需 apt/yum install autossh）</dd>
+                  <dt>-M 0</dt><dd>关闭自带监视端口，改用 ServerAlive 探测（推荐做法）</dd>
+                  <dt>AUTOSSH_GATETIME=0</dt><dd>启动时即使连不上也不放弃，适合开机自启</dd>
+                </dl>
               </div>
               <div class="hint tight">
-                密码认证首次连接会交互输入；常驻建议先 <b>ssh-copy-id</b> 配好密钥。
-                autossh 需服务器已安装（apt/yum install autossh）。
+                密码认证首次连接会交互输入；常驻建议先 <b>ssh-copy-id</b> 配好密钥再跑。
               </div>
+            </div>
+          </section>
+
+          <!-- 帮助: 定位说明 + 三形态图示 + FAQ -->
+          <section class="page" data-page="help">
+            <header class="page-head">
+              <h2>帮助</h2>
+              <p>proxyTool 是什么、怎么用</p>
+            </header>
+
+            <div class="card">
+              <h3>proxyTool 是什么</h3>
+              <p class="lead">
+                在你的<b>电脑</b>和<b>远程服务器</b>之间一键建立 SSH 隧道 —— 免命令行、断线自动重连、密码不落盘。
+              </p>
+              <div class="steps">
+                <div class="step"><span class="step-n">1</span><div><strong>新建服务器</strong><span>填地址和账号，像 SSH 客户端一样</span></div></div>
+                <div class="step"><span class="step-n">2</span><div><strong>新建隧道</strong><span>选一个场景预设（如 VPN 共享），参数自动填好</span></div></div>
+                <div class="step"><span class="step-n">3</span><div><strong>点 ▶ 启动</strong><span>服务器块上的播放键一次启动全部隧道</span></div></div>
+              </div>
+              <button type="button" id="help-new-server" class="primary">新建第一台服务器</button>
+            </div>
+
+            <div class="card">
+              <h3>三种隧道形态</h3>
+
+              <div class="kind-doc">
+                <div class="kind-doc-head"><span class="ktag">反向 -R</span><strong>服务器 → 你的电脑</strong></div>
+                <p>在服务器上开端口，流量回到你电脑。典型：<b>让服务器借你 PC 的 VPN 出网</b>（服务器 127.0.0.1:1080 → 你电脑的 SOCKS 代理），或让服务器访问你电脑上的服务。</p>
+              </div>
+              <div class="kind-doc">
+                <div class="kind-doc-head"><span class="ktag">本地 -L</span><strong>你的电脑 → 服务器</strong></div>
+                <p>在你电脑上开端口，访问<b>服务器侧或其内网</b>的服务。典型：本机 3307 → 服务器内网的 MySQL。</p>
+              </div>
+              <div class="kind-doc">
+                <div class="kind-doc-head"><span class="ktag">动态 -D</span><strong>你的电脑 → 服务器（SOCKS5）</strong></div>
+                <p>在你电脑上开一个 SOCKS5 代理，任意流量<b>经服务器代连</b> —— 浏览器挂上就能访问服务器内网。</p>
+              </div>
+              <div class="hint tight">「命令生成」页是第四种场景：服务器 ↔ 服务器，命令拷到服务器上执行，不经过本机。</div>
+            </div>
+
+            <div class="card">
+              <h3>常见问题</h3>
+              <details>
+                <summary>密码会被保存吗？</summary>
+                <p>只在本次会话的内存里缓存，<b>永不写入磁盘</b>；认证被拒立即清除，重开软件需重输。</p>
+              </details>
+              <details>
+                <summary>首次连接弹出的「指纹」是什么？</summary>
+                <p>首次连接会记住服务器公钥指纹（TOFU），之后指纹一旦变化就拒绝连接并提示 —— 防中间人攻击。服务器详情页可查看 / 复制 / 清除。</p>
+              </details>
+              <details>
+                <summary>服务器块上的 ▶ 一键启动做了什么？</summary>
+                <p>启动该服务器全部勾了「自启」的隧道；密码认证首次会要一次密码，之后会话内免输。</p>
+              </details>
+              <details>
+                <summary>共享 SSH 连接是什么？</summary>
+                <p>同一服务器的多条隧道复用一条 SSH 连接（N 条隧道只认证一次）；受服务器 MaxSessions 限制，将满时自动改用独立连接。</p>
+              </details>
+              <details>
+                <summary>点关闭按钮软件退出了吗？</summary>
+                <p>没有 —— 收进系统托盘继续运行，隧道不断；托盘图标右键菜单里才是真正退出。</p>
+              </details>
+              <details>
+                <summary>隧道断了会自动重连吗？</summary>
+                <p>会。快试 3 次后指数退避（最长 30 秒），连接保持 3 秒以上退避清零；行菜单里有「立即重试」。</p>
+              </details>
             </div>
           </section>
 
@@ -220,7 +304,7 @@
             <div id="detail-empty" class="dp-view">
               <div class="dp-empty">
                 <p>选择左侧服务器查看详情</p>
-                <p class="hint">点块上的<b>播放键</b>可一键启动其全部自启隧道；没有服务器就先「＋ 新建」。</p>
+                <p class="hint">每台服务器可建多条<b>本机 ↔ 该服务器</b>的隧道；块上的<b>播放键</b>一键全部启动，没有服务器就先「＋ 新建」。</p>
               </div>
             </div>
 

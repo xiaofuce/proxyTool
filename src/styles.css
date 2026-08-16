@@ -306,6 +306,12 @@ body {
   display: block;
 }
 
+/* 命令生成/帮助页内容更宽 (图示与命令行需要横向空间) */
+.page[data-page="tools"],
+.page[data-page="help"] {
+  max-width: 880px;
+}
+
 .page-head h2 {
   margin: 0 0 2px;
   font-size: var(--fs-xl);
@@ -1072,7 +1078,7 @@ button.danger:hover:not(:disabled) {
   font-size: var(--fs-sm);
 }
 
-/* ===================== 工具页: 命令生成器 ===================== */
+/* ===================== 命令生成页 ===================== */
 .cg-target {
   display: grid;
   grid-template-columns: 1fr 1fr;
@@ -1081,6 +1087,74 @@ button.danger:hover:not(:disabled) {
 
 #cg-target-wrap.hidden {
   display: none;
+}
+
+/* 流程图示: 在哪监听 → SSH → 流量去向 (按形态换序换文案, JS 渲染) */
+.flow {
+  display: flex;
+  align-items: stretch;
+  gap: 10px;
+  margin: 2px 0 14px;
+}
+
+.flow-node {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  gap: 9px;
+  align-items: center;
+  padding: 9px 11px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+}
+
+.flow-ic {
+  display: grid;
+  place-items: center;
+  width: 34px;
+  height: 34px;
+  border-radius: var(--radius-full);
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  color: var(--accent);
+  flex-shrink: 0;
+}
+
+.flow-tx {
+  min-width: 0;
+}
+
+.flow-tx strong {
+  display: block;
+  font-size: var(--fs-sm);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.flow-tx span {
+  display: block;
+  font-size: var(--fs-xs);
+  color: var(--muted);
+  margin-top: 1px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.flow-arrow {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  color: var(--muted);
+}
+
+.flow-arrow span {
+  font-size: var(--fs-xs);
+  color: var(--muted);
+  margin-top: 1px;
 }
 
 .cmd-block {
@@ -1127,6 +1201,165 @@ button.danger:hover:not(:disabled) {
   color: var(--text);
   white-space: pre-wrap;
   word-break: break-all;
+}
+
+/* 命令逐项解释 (dt = 选项, dd = 作用) */
+.cmd-notes {
+  margin: 0;
+  padding: 9px 12px 10px;
+  border-top: 1px dashed var(--border-strong);
+  background: var(--surface);
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 5px 14px;
+}
+
+.cmd-notes dt {
+  font-family: "Cascadia Mono", Consolas, monospace;
+  font-size: var(--fs-xs);
+  color: var(--text-2);
+  white-space: nowrap;
+}
+
+.cmd-notes dd {
+  margin: 0;
+  font-size: var(--fs-xs);
+  color: var(--muted);
+  line-height: 1.5;
+}
+
+/* ===================== 帮助页 ===================== */
+.lead {
+  margin: 0 0 14px;
+  font-size: var(--fs-base);
+  line-height: 1.7;
+  color: var(--text-2);
+}
+
+.steps {
+  display: grid;
+  gap: 10px;
+  margin-bottom: 16px;
+}
+
+.step {
+  display: flex;
+  gap: 11px;
+  align-items: flex-start;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--inset);
+}
+
+.step-n {
+  display: grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  border-radius: var(--radius-full);
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  color: var(--accent);
+  font-size: var(--fs-sm);
+  font-weight: 600;
+  flex-shrink: 0;
+}
+
+.step strong {
+  display: block;
+  font-size: var(--fs-base);
+}
+
+.step > div > span {
+  display: block;
+  font-size: var(--fs-sm);
+  color: var(--muted);
+  margin-top: 1px;
+}
+
+.kind-doc {
+  padding: 11px 0 4px;
+  border-top: 1px solid var(--border);
+}
+
+.kind-doc:first-of-type {
+  border-top: 0;
+  padding-top: 0;
+}
+
+.kind-doc-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+
+.ktag {
+  font-family: "Cascadia Mono", Consolas, monospace;
+  font-size: var(--fs-xs);
+  padding: 1px 8px;
+  border-radius: var(--radius-full);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  color: var(--text-2);
+  white-space: nowrap;
+}
+
+.kind-doc p {
+  margin: 0;
+  font-size: var(--fs-sm);
+  color: var(--text-2);
+  line-height: 1.65;
+}
+
+/* FAQ 折叠项 */
+details {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--inset);
+  margin-bottom: 8px;
+}
+
+details summary {
+  cursor: pointer;
+  padding: 9px 12px;
+  font-size: var(--fs-base);
+  font-weight: 500;
+  display: flex;
+  align-items: center;
+  list-style: none;
+}
+
+details summary::-webkit-details-marker {
+  display: none;
+}
+
+details summary::after {
+  content: "";
+  margin-left: auto;
+  width: 7px;
+  height: 7px;
+  border-right: 1.5px solid var(--muted);
+  border-bottom: 1.5px solid var(--muted);
+  transform: rotate(-45deg);
+  transition: transform 0.15s ease;
+  flex-shrink: 0;
+}
+
+details[open] summary::after {
+  transform: rotate(45deg);
+}
+
+details summary:hover {
+  color: var(--text);
+}
+
+details p {
+  margin: 0;
+  padding: 0 12px 10px;
+  font-size: var(--fs-sm);
+  color: var(--text-2);
+  line-height: 1.65;
 }
 
 /* 分段选择 (形态/落地后端) */
