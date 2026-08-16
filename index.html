@@ -31,16 +31,21 @@
         </div>
         <nav class="nav">
           <button class="nav-item active" data-page="servers">
-            <span class="nav-icon">▤</span><span class="nav-label">服务器</span>
+            <span class="nav-icon"></span><span class="nav-label">服务器</span>
           </button>
           <button class="nav-item" data-page="tunnels">
-            <span class="nav-icon">⇄</span><span class="nav-label">总览</span>
+            <span class="nav-icon"></span><span class="nav-label">总览</span>
             <span class="nav-dot" id="dot-tunnels"></span>
           </button>
           <button class="nav-item" data-page="defaults">
-            <span class="nav-icon">⚙</span><span class="nav-label">默认值</span>
+            <span class="nav-icon"></span><span class="nav-label">默认值</span>
           </button>
         </nav>
+        <div class="theme-seg" id="theme-toggle" role="group" aria-label="主题">
+          <button type="button" data-pref="light"></button>
+          <button type="button" data-pref="system"></button>
+          <button type="button" data-pref="dark"></button>
+        </div>
         <div class="sidebar-foot">密码仅存内存 · 不落盘</div>
       </aside>
 
@@ -49,7 +54,7 @@
         <section class="hosts-col page" data-page="servers">
           <header class="page-head">
             <h2>服务器</h2>
-            <p>点选服务器管理其隧道；块上 ▶ 一键启动</p>
+            <p>点选服务器管理其隧道；块上的播放键一键启动</p>
           </header>
           <div id="host-grid"></div>
         </section>
@@ -139,7 +144,7 @@
             <div id="detail-empty" class="dp-view">
               <div class="dp-empty">
                 <p>选择左侧服务器查看详情</p>
-                <p class="hint">点块上的 <b>▶</b> 可一键启动其全部自启隧道；没有服务器就先「+ 新建」。</p>
+                <p class="hint">点块上的<b>播放键</b>可一键启动其全部自启隧道；没有服务器就先「＋ 新建」。</p>
               </div>
             </div>
 
@@ -149,7 +154,7 @@
               <div id="pd-pwbar" class="pw-bar hidden"></div>
               <div class="list-head">
                 <span class="field-title">隧道</span>
-                <button type="button" id="pd-new-tunnel" class="primary">＋ 新建隧道</button>
+                <button type="button" id="pd-new-tunnel" class="primary">新建隧道</button>
               </div>
               <div id="pd-tunnels"></div>
               <div id="pd-fingerprint"></div>
@@ -158,7 +163,7 @@
             <!-- 服务器表单 (新建/编辑) -->
             <form id="server-form" class="dp-view hidden">
               <div class="dp-head">
-                <button type="button" id="sf-back" class="icon-btn" title="返回">←</button>
+                <button type="button" id="sf-back" class="icon-btn" title="返回" aria-label="返回"></button>
                 <h3 id="sf-title">新建服务器</h3>
               </div>
               <input type="hidden" id="profile-id" />
@@ -204,7 +209,7 @@
             <!-- 新建隧道: 选场景 (预设 + 自定义 + 我的场景) -->
             <div id="scenario-pick" class="dp-view hidden">
               <div class="dp-head">
-                <button type="button" id="sp-back" class="icon-btn" title="返回">←</button>
+                <button type="button" id="sp-back" class="icon-btn" title="返回" aria-label="返回"></button>
                 <h3 id="sp-title">新建隧道 — 选择场景</h3>
               </div>
               <div class="field-title">场景预设</div>
@@ -221,7 +226,7 @@
             <!-- 新建隧道: 表单 (kind/backend 驱动) -->
             <form id="tunnel-form" class="dp-view hidden">
               <div class="dp-head">
-                <button type="button" id="tf-back" class="icon-btn" title="重选场景">←</button>
+                <button type="button" id="tf-back" class="icon-btn" title="重选场景" aria-label="重选场景"></button>
                 <h3 id="tf-title">新建隧道</h3>
               </div>
 

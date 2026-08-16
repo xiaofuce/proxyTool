@@ -225,6 +225,41 @@ body {
   border-top: 1px solid var(--border);
 }
 
+/* 主题三态分段控件 (浅色/跟随系统/深色) */
+.theme-seg {
+  display: flex;
+  gap: 2px;
+  padding: 3px;
+  margin-bottom: 10px;
+  background: var(--inset);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+}
+
+.theme-seg button {
+  flex: 1;
+  height: 26px;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  background: transparent;
+  color: var(--muted);
+  border-radius: var(--radius-sm);
+}
+
+.theme-seg button:hover:not(.active):not(:disabled) {
+  background: var(--hover);
+  border-color: transparent;
+}
+
+.theme-seg button.active {
+  background: var(--surface);
+  color: var(--accent);
+  box-shadow: var(--shadow-1);
+}
+
 /* ---------- 内容区 ---------- */
 .content {
   flex: 1;
@@ -321,6 +356,13 @@ button:focus-visible {
 
 .hidden {
   display: none !important;
+}
+
+/* ---------- 图标 (lucide, .ic 由 icons.ts 注入) ---------- */
+.ic {
+  display: inline-block;
+  vertical-align: -2px; /* 行内图标与文字基线对齐 */
+  flex-shrink: 0;
 }
 
 .port-row {
@@ -620,11 +662,22 @@ button.danger:hover:not(:disabled) {
   padding: 6px 8px;
   color: var(--muted);
   font-size: var(--fs-md);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
 }
 
 .icon-btn:hover:not(:disabled) {
   border: none;
   color: var(--accent);
+}
+
+/* 图标 + 文字的按钮 (main.ts applyStaticIcons / U3 起行内动作) */
+#pd-new-tunnel {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
 }
 
 /* ===================== 服务器块列 (Termius 式) ===================== */
@@ -710,13 +763,18 @@ button.danger:hover:not(:disabled) {
   animation: pulse 1.2s ease-in-out infinite;
 }
 
-/* ▶ 一键启动 / ■ 全部停止 */
+/* ▶ 一键启动 / ■ 全部停止 (icon 按钮) */
 .hb-toggle {
   position: absolute;
   right: 10px;
   bottom: 10px;
-  padding: 3px 10px;
-  font-size: var(--fs-md);
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--muted);
   border-radius: var(--radius-sm);
 }
 
@@ -725,7 +783,10 @@ button.danger:hover:not(:disabled) {
   border-color: var(--border-strong);
   background: transparent;
   box-shadow: none;
+  flex-direction: row;
   align-items: center;
+  justify-content: center;
+  gap: 6px;
   color: var(--muted);
 }
 
@@ -908,11 +969,16 @@ button.danger:hover:not(:disabled) {
   position: absolute;
   top: 6px;
   right: 6px;
-  padding: 2px 7px;
-  font-size: var(--fs-sm);
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   border: none;
   background: transparent;
   color: var(--muted);
+  cursor: pointer;
 }
 
 .scenario-card .sc-del:hover {

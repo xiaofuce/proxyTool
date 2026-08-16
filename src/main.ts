@@ -1,5 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { icon, type IconName } from "./icons";
+import { initTheme } from "./theme";
 
 // ---------- 类型 (与 core serde camelCase 对应) ----------
 interface Profile {
@@ -279,8 +281,8 @@ function renderTunnelRows(container: HTMLElement, list: TunnelDto[]) {
     const expand = document.createElement("button");
     expand.type = "button";
     expand.className = "icon-btn tunnel-expand";
-    expand.textContent = "▸";
-    expand.title = "展开日志";
+    expand.innerHTML = icon("chevron-right", 14);
+    expand.setAttribute("aria-label", "展开日志");
 
     const title = document.createElement("div");
     title.className = "tunnel-title";
@@ -629,7 +631,9 @@ function renderHosts() {
 
     const addr = document.createElement("div");
     addr.className = "hb-addr";
-    addr.textContent = `${p.host}:${p.port} · ${p.username}${p.identityFile ? " · 🔑" : ""}`;
+    addr.innerHTML =
+      `${escapeHtml(`${p.host}:${p.port} · ${p.username}`)}` +
+      (p.identityFile ? ` <span class="hb-key" title="密钥认证">${icon("key", 12)}</span>` : "");
 
     const count = document.createElement("div");
     count.className = "hb-count";
@@ -647,7 +651,8 @@ function renderHosts() {
     const anyActive = tunnels.some(
       (t) => t.profileId === p.id && ACTIVE_STATES.includes(t.state)
     );
-    toggle.textContent = anyActive ? "■" : "▶";
+    toggle.innerHTML = anyActive ? icon("square", 14) : icon("play", 14);
+    toggle.setAttribute("aria-label", anyActive ? "全部停止" : "一键启动");
     toggle.title = anyActive
       ? "停止该服务器的全部隧道"
       : "一键启动该服务器全部 enabled 隧道 (密码认证首次会要求输入密码)";
@@ -667,7 +672,7 @@ function renderHosts() {
   const newBlock = document.createElement("button");
   newBlock.type = "button";
   newBlock.className = "host-block new-block";
-  newBlock.textContent = "＋ 新建";
+  newBlock.innerHTML = `${icon("plus", 14)}<span class="btn-label">新建</span>`;
   newBlock.addEventListener("click", () => openServerForm(null));
   grid.append(newBlock);
 }
@@ -971,7 +976,7 @@ async function openScenarioPick() {
     // ✕ 删除 (不触发选择)
     const del = document.createElement("span");
     del.className = "sc-del";
-    del.textContent = "✕";
+    del.innerHTML = icon("x", 13);
     del.title = "删除此场景";
     del.addEventListener("click", async (e) => {
       e.stopPropagation();
@@ -1393,6 +1398,27 @@ async function loadAutostart() {
 }
 
 // ---------- 初始化 ----------
+/** 静态位图标填充 (nav / 返回钮 / 新建隧道钮) —— HTML 留空, 图标统一走 icons.ts */
+function applyStaticIcons() {
+  const NAV_ICONS: Record<string, IconName> = {
+    servers: "server",
+    tunnels: "arrow-right-left",
+    defaults: "settings",
+  };
+  for (const b of document.querySelectorAll<HTMLElement>(".nav-item")) {
+    const slot = b.querySelector(".nav-icon");
+    const name = NAV_ICONS[b.dataset.page ?? ""];
+    if (slot && name) slot.innerHTML = icon(name);
+  }
+  for (const id of ["sf-back", "sp-back", "tf-back"]) {
+    el<HTMLButtonElement>(id).innerHTML = icon("arrow-left");
+  }
+  el<HTMLButtonElement>("pd-new-tunnel").innerHTML =
+    `${icon("plus", 15)}<span class="btn-label">新建隧道</span>`;
+}
+
+applyStaticIcons();
+initTheme();
 (async () => {
   profiles = await invoke<Profile[]>("list_profiles");
   tunnels = await invoke<TunnelDto[]>("tunnels_list");
