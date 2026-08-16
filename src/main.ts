@@ -2146,6 +2146,25 @@ applyStaticIcons();
 initAppearance();
 initCmdGen();
 initHelp();
+
+// 滚动条自动隐藏: 滚动时给容器加 .scrolling (CSS 显色 thumb), 静止 400ms 后移除。
+// scroll 不冒泡, 用 capture 拦截所有容器 (content/hosts-col/日志/textarea…)。
+{
+  const timers = new WeakMap<Element, number>();
+  document.addEventListener(
+    "scroll",
+    (e) => {
+      const t = e.target;
+      if (!(t instanceof Element)) return; // document 滚动 (本应用 body 不滚)
+      t.classList.add("scrolling");
+      const prev = timers.get(t);
+      if (prev) clearTimeout(prev);
+      timers.set(t, window.setTimeout(() => t.classList.remove("scrolling"), 400));
+    },
+    true,
+  );
+}
+
 (async () => {
   // 三拉: 隧道 + 档案 + 已记住凭据 (rememberedIds —— 凭据卡/免输启动/自启判定,
   // 漏拉则新会话 (重启/reload) 恒空, 记住了密码 UI 仍会询问)
