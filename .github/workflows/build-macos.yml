@@ -1,0 +1,68 @@
+name: build-macos
+
+# macOS 安装包云端构建 (本仓库无 Mac 开发机, 借 GitHub Actions macos runner)。
+# 手动触发可指定挂到哪个 release tag; 推 v* tag 时自动构建并挂到对应 release。
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "Attach the dmg to this release tag (e.g. v0.1.0). Empty = build only."
+        required: false
+        default: ""
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  dmg:
+    runs-on: macos-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install frontend deps
+        run: npm install
+
+      - name: Build universal dmg
+        run: npm run tauri build -- --target universal-apple-darwin --bundles dmg
+
+      - name: Locate dmg
+        id: dmg
+        run: |
+          DMG=$(find target -name '*.dmg' -print -quit)
+          [ -n "$DMG" ] || { echo "no dmg found"; exit 1; }
+          echo "path=$DMG" >> "$GITHUB_OUTPUT"
+          ls -la "$DMG"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-universal-dmg
+          path: ${{ steps.dmg.outputs.path }}
+          if-no-files-found: error
+
+      - name: Compute release tag
+        id: tag
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ -n "${{ inputs.release_tag }}" ]; then
+            echo "tag=${{ inputs.release_tag }}" >> "$GITHUB_OUTPUT"
+          elif [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            echo "tag=${GITHUB_REF#refs/tags/}" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Attach dmg to release
+        if: steps.tag.outputs.tag != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "${{ steps.tag.outputs.tag }}" "${{ steps.dmg.outputs.path }}" --clobber
