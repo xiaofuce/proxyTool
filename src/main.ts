@@ -221,6 +221,16 @@ function summary(t: TunnelDto): string {
   return `本机 SOCKS5 ${k.dynamic.bind}:${k.dynamic.port} → 服务器代连内网`;
 }
 
+/** 摘要行文案: 总览页 = 服务器名 · summary (跨服务器需定位);
+ * 服务器详情页 (上下文已知是谁) = summary · host (host 比别名有增量) */
+function subLine(t: TunnelDto, overview: boolean): string {
+  const profile = profiles.find((p) => p.id === t.profileId);
+  if (!profile) return `档案缺失 — ${summary(t)}`;
+  return overview
+    ? `${profile.name} · ${summary(t)}`
+    : `${summary(t)} · ${profile.host}`;
+}
+
 /** vpn_share 形态 (反向 + SOCKS 落地): 显示「验证外网 / 部署 proxy」动作 */
 function isVpnShare(t: TunnelDto): boolean {
   return kindTag(t.kind) === "reverse" && "socksAuto" in t.backend;
@@ -320,8 +330,9 @@ function updateRow(t: TunnelDto) {
 }
 
 /** 把一批隧道行渲染进容器 (总览页/服务器详情页共用; rowRefs 单容器假设: 同一时刻只显示一页)。
- * U4 行结构: head(展开|名称+形态+端口chip|状态徽章|时长|启动/停止+⋯) + 摘要行 + 消息行 + 详情 */
-function renderTunnelRows(container: HTMLElement, list: TunnelDto[]) {
+ * U4 行结构: head(展开|名称+形态+端口chip|状态徽章|时长|启动/停止+⋯) + 摘要行 + 消息行 + 详情。
+ * overview: 摘要行带服务器名前缀 (总览页跨服务器定位) */
+function renderTunnelRows(container: HTMLElement, list: TunnelDto[], overview = false) {
   closeMenus(); // 行将整表重建, 悬挂的菜单锚点一并收掉
   container.innerHTML = "";
   for (const t of list) {
@@ -374,12 +385,10 @@ function renderTunnelRows(container: HTMLElement, list: TunnelDto[]) {
     head.append(expand, title, status, uptime, actions);
     card.append(head);
 
-    // --- 摘要行 (服务器 · 参数概览; ellipsis + title 全文) ---
+    // --- 摘要行 (总览: 服务器名 · 参数 / 服务器页: 参数 · host; ellipsis + title 全文) ---
     const sub = document.createElement("div");
     sub.className = "tunnel-sub";
-    sub.textContent = profile
-      ? `${profile.name} · ${profile.host} — ${summary(t)}`
-      : `档案缺失 — ${summary(t)}`;
+    sub.textContent = subLine(t, overview);
     sub.title = sub.textContent;
     card.append(sub);
 
@@ -687,23 +696,103 @@ function currentTunnel(id: string): TunnelDto | undefined {
   return tunnels.find((t) => t.id === id);
 }
 
-/** 总览页: 全部隧道 */
-function renderOverview() {
-  rowRefs.clear();
-  const listEl = el<HTMLDivElement>("tunnel-list");
-  el<HTMLDivElement>("tunnel-empty").classList.toggle("hidden", tunnels.length > 0);
-  el<HTMLSpanElement>("tunnel-count").textContent = tunnels.length
-    ? `${tunnels.length} 条隧道`
-    : "";
-  renderTunnelRows(listEl, tunnels);
+/** 总览筛选 (模块级, 跨重绘保持; 计数恒显全量, 筛选只影响列表) */
+type OvFilter = "all" | "running" | "pending" | "error" | "off";
+let overviewFilter: OvFilter = "all";
+
+const OV_FILTERS: { key: OvFilter; label: string; match: (s: string) => boolean }[] = [
+  { key: "all", label: "全部", match: () => true },
+  { key: "running", label: "运行中", match: (s) => s === "connected" },
+  { key: "pending", label: "进行中", match: (s) => s === "connecting" || s === "reconnecting" },
+  { key: "error", label: "异常", match: (s) => s === "error" },
+  { key: "off", label: "未启动", match: (s) => s === "disconnected" },
+];
+
+/** 统计头: 总数/运行中/进行中/异常 (零值不着色, >0 才亮) */
+function renderOvStats() {
+  const box = el<HTMLDivElement>("ov-stats");
+  const running = tunnels.filter((t) => t.state === "connected").length;
+  const pending = tunnels.filter((t) => t.state === "connecting" || t.state === "reconnecting").length;
+  const errors = tunnels.filter((t) => t.state === "error").length;
+  const stats: [number, string, string][] = [
+    [tunnels.length, "总数", ""],
+    [running, "运行中", running > 0 ? "success" : ""],
+    [pending, "进行中", pending > 0 ? "warning" : ""],
+    [errors, "异常", errors > 0 ? "danger" : ""],
+  ];
+  box.innerHTML = "";
+  for (const [n, label, cls] of stats) {
+    const stat = document.createElement("div");
+    stat.className = "ov-stat" + (cls ? " " + cls : "");
+    const num = document.createElement("strong");
+    num.textContent = String(n);
+    const lab = document.createElement("span");
+    lab.textContent = label;
+    stat.append(num, lab);
+    box.append(stat);
+  }
 }
 
+/** 筛选 chips: 带全量计数, 选中态 = overviewFilter */
+function renderOvFilter() {
+  const box = el<HTMLDivElement>("ov-filter");
+  box.innerHTML = "";
+  for (const f of OV_FILTERS) {
+    const n = f.key === "all" ? tunnels.length : tunnels.filter((t) => f.match(t.state)).length;
+    const chip = document.createElement("button");
+    chip.type = "button";
+    chip.className = "ov-chip" + (overviewFilter === f.key ? " active" : "");
+    const lab = document.createElement("span");
+    lab.textContent = f.label;
+    const cnt = document.createElement("strong");
+    cnt.textContent = String(n);
+    chip.append(lab, cnt);
+    chip.addEventListener("click", () => {
+      overviewFilter = f.key;
+      renderOverview();
+    });
+    box.append(chip);
+  }
+}
+
+/** 总览页: 统计头 + 筛选 + (过滤后) 全部隧道 */
+function renderOverview() {
+  rowRefs.clear();
+  const empty = tunnels.length === 0;
+  el<HTMLDivElement>("tunnel-empty").classList.toggle("hidden", !empty);
+  el<HTMLDivElement>("ov-stats").classList.toggle("hidden", empty);
+  el<HTMLDivElement>("ov-filter-row").classList.toggle("hidden", empty);
+  if (!empty) {
+    renderOvStats();
+    renderOvFilter();
+  }
+  const f = OV_FILTERS.find((x) => x.key === overviewFilter)!;
+  const list = tunnels.filter((t) => f.match(t.state));
+  el<HTMLDivElement>("ov-no-match").classList.toggle("hidden", empty || list.length > 0);
+  el<HTMLSpanElement>("tunnel-count").textContent =
+    overviewFilter === "all" ? `${tunnels.length} 条隧道` : `${list.length} / ${tunnels.length} 条`;
+  renderTunnelRows(el<HTMLDivElement>("tunnel-list"), list, true);
+}
+
+/** 双拉隧道 + 档案 (档案列表曾只 init 拉一次导致陈旧); 托盘常驻场景由 window focus 兜底刷新 */
 async function refreshTunnels() {
-  tunnels = await invoke<TunnelDto[]>("tunnels_list");
+  const [ts, ps] = await Promise.all([
+    invoke<TunnelDto[]>("tunnels_list"),
+    invoke<Profile[]>("list_profiles"),
+  ]);
+  tunnels = ts;
+  profiles = ps;
   renderHosts();
   renderCurrentPage();
   if (detailView === "detail") renderServerDetail();
 }
+
+/** 托盘常驻/他窗口操作后回窗: 防抖刷新一次 (focus 事件连发) */
+let focusRefreshTimer: number | undefined;
+window.addEventListener("focus", () => {
+  clearTimeout(focusRefreshTimer);
+  focusRefreshTimer = window.setTimeout(() => refreshTunnels().catch(() => {}), 600);
+});
 
 // ---------- 后端事件 (按 id 键控) ----------
 interface StatusPayload {
@@ -719,12 +808,25 @@ listen("tunnel-status", (e) => {
   if (t) {
     t.state = p.state;
     t.message = p.message;
+    // 凭据失效即逐出缓存 (tunnel_start 受理即返回, 缓存是乐观的):
+    // 认证被拒 / 私钥加载失败(口令不对) → 清掉, 下次启动重新询问, 不静默复用坏凭据
+    const msg = p.message ?? "";
+    if (p.state === "error" && (msg.includes("认证被拒") || msg.includes("加载私钥"))) {
+      passwords.delete(t.profileId);
+    }
     noteConnected(t); // 进/出 connected 维护 uptime 起算点
     updateRow(t);
     if (p.message && p.state !== "connected")
       appendLog(p.id, p.state === "error" ? `❌ ${p.message}` : p.message);
     // 块状态点/计数随事件刷新 (总在)
     renderHosts();
+    // 总览页统计头/chips 计数随事件刷新 (轻量重建, 不动行);
+    // 筛选视图下行的归属可能变化 (如 运行中→异常), 整表重渲染保持筛选正确
+    if (activePage() === "tunnels") {
+      renderOvStats();
+      renderOvFilter();
+      if (overviewFilter !== "all") renderOverview();
+    }
     if (p.state === "connected") {
       // 端口 0 动态分配回填会改 spec, 连接成功时拉一次最新列表
       refreshTunnels().catch(() => {});
@@ -770,6 +872,7 @@ function renderHosts() {
     block.className = "host-block";
     if (p.id === selectedProfileId) block.classList.add("active");
 
+    // 行 1: 状态点 + 名称 (右留白给 ▶ 钮)
     const name = document.createElement("div");
     name.className = "hb-name";
     const dot = document.createElement("span");
@@ -779,29 +882,31 @@ function renderHosts() {
     nameText.textContent = p.name;
     name.append(dot, nameText);
 
+    // 行 2: 地址 + 运行统计 pill (右对齐; 运行>0 亮绿)
+    const meta = document.createElement("div");
+    meta.className = "hb-meta";
     const addr = document.createElement("div");
     addr.className = "hb-addr";
     addr.innerHTML =
       `${escapeHtml(`${p.host}:${p.port} · ${p.username}`)}` +
       (p.identityFile ? ` <span class="hb-key" title="密钥认证">${icon("key", 12)}</span>` : "");
+    const pill = document.createElement("span");
+    pill.className = "hb-pill" + (agg.running > 0 ? " running" : "");
+    pill.textContent =
+      agg.total === 0 ? "无隧道" : `${agg.running}/${agg.total} 运行`;
+    pill.title =
+      agg.total === 0 ? "还没有隧道" : `${agg.running} 条运行 / 共 ${agg.total} 条`;
+    meta.append(addr, pill);
 
-    const count = document.createElement("div");
-    count.className = "hb-count";
-    count.textContent =
-      agg.total === 0
-        ? "无隧道"
-        : agg.total === agg.running
-          ? `${agg.total} 条隧道 · 全部运行`
-          : `${agg.total} 条隧道 · ${agg.running} 运行`;
-
-    // ▶ 一键启动 enabled 隧道 / ■ 全部停止
+    // ▶ 一键启动 enabled 隧道 / ■ 全部停止 (右上角圆形钮)
     const toggle = document.createElement("button");
     toggle.type = "button";
     toggle.className = "hb-toggle";
     const anyActive = tunnels.some(
       (t) => t.profileId === p.id && ACTIVE_STATES.includes(t.state)
     );
-    toggle.innerHTML = anyActive ? icon("square", 14) : icon("play", 14);
+    if (anyActive) toggle.classList.add("stop");
+    toggle.innerHTML = anyActive ? icon("square", 13) : icon("play", 13);
     toggle.setAttribute("aria-label", anyActive ? "全部停止" : "一键启动");
     toggle.title = anyActive
       ? "停止该服务器的全部隧道"
@@ -813,7 +918,7 @@ function renderHosts() {
       withLoading(toggle, () => (anyActive ? stopAllForProfile(p) : startAllForProfile(p)));
     });
 
-    block.append(name, addr, count, toggle);
+    block.append(name, meta, toggle);
     block.addEventListener("click", () => selectProfile(p.id));
     grid.append(block);
   }
@@ -984,8 +1089,7 @@ function renderServerDetail(showPwBar = false) {
   const mine = tunnels.filter((t) => t.profileId === p.id);
   const listEl = el<HTMLDivElement>("pd-tunnels");
   if (mine.length === 0) {
-    listEl.innerHTML =
-      '<div class="hint" style="min-height:0;margin:4px 0">还没有隧道 —— 点右上「＋ 新建隧道」从场景开始</div>';
+    listEl.innerHTML = '<div class="hint tight">还没有隧道 —— 点右上「＋ 新建隧道」从场景开始</div>';
   } else {
     renderTunnelRows(listEl, mine);
   }

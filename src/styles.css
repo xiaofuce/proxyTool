@@ -765,6 +765,7 @@ button.danger:hover:not(:disabled) {
   box-shadow: 0 0 0 1px var(--accent) inset;
 }
 
+/* 行 1: 状态点 + 名称; 右留白给 ▶ 圆钮 */
 .host-block .hb-name {
   display: flex;
   align-items: center;
@@ -772,16 +773,46 @@ button.danger:hover:not(:disabled) {
   font-size: var(--fs-base);
   font-weight: 600;
   color: var(--text);
+  padding-right: 30px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 行 2: 地址 (省略) + 运行统计 pill 右对齐 */
+.hb-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-width: 0;
 }
 
 .host-block .hb-addr {
+  flex: 1;
+  min-width: 0;
   font-size: var(--fs-sm);
   color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
-.host-block .hb-count {
+/* 运行统计 pill: 运行 >0 亮 success 软底 */
+.hb-pill {
+  flex-shrink: 0;
   font-size: var(--fs-xs);
+  line-height: 18px;
+  padding: 0 8px;
+  border-radius: var(--radius-full);
+  background: var(--surface-2);
   color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.hb-pill.running {
+  background: color-mix(in srgb, var(--success) 12%, transparent);
+  color: var(--success);
 }
 
 .hb-status {
@@ -803,19 +834,32 @@ button.danger:hover:not(:disabled) {
   animation: pulse 1.2s ease-in-out infinite;
 }
 
-/* ▶ 一键启动 / ■ 全部停止 (icon 按钮) */
+/* ▶ 一键启动 / ■ 全部停止: 右上角 24px 圆形钮, hover 显色 (停止态红) */
 .hb-toggle {
   position: absolute;
-  right: 10px;
-  bottom: 10px;
-  width: 28px;
-  height: 28px;
+  top: 9px;
+  right: 9px;
+  width: 24px;
+  height: 24px;
   padding: 0;
   display: inline-flex;
   align-items: center;
   justify-content: center;
+  border: none;
+  background: transparent;
   color: var(--muted);
-  border-radius: var(--radius-sm);
+  border-radius: 50%;
+}
+
+.hb-toggle:hover:not(:disabled) {
+  border: none;
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+}
+
+.hb-toggle.stop:hover:not(:disabled) {
+  color: var(--danger);
+  background: color-mix(in srgb, var(--danger) 14%, transparent);
 }
 
 .host-block.new-block {
@@ -1286,4 +1330,98 @@ button.danger-primary:hover:not(:disabled) {
 /* ⋯ 钮收窄到图标钮尺寸 (抵消 .tunnel-actions button 的统一 padding) */
 .tunnel-actions .more-btn {
   padding: 6px 8px;
+}
+
+/* ===================== U5: 总览统计头 + 筛选 + 表单散值归位 ===================== */
+
+/* 统计头: 4 格 (总数/运行中/进行中/异常), 零值中性 / >0 亮色 */
+.ov-stats {
+  display: flex;
+  gap: 10px;
+  margin-bottom: 12px;
+}
+
+.ov-stat {
+  flex: 1;
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 10px 14px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-1);
+}
+
+.ov-stat strong {
+  font-size: var(--fs-xl);
+  line-height: 1;
+  font-variant-numeric: tabular-nums;
+}
+
+.ov-stat span {
+  font-size: var(--fs-sm);
+  color: var(--muted);
+}
+
+.ov-stat.success strong { color: var(--success); }
+.ov-stat.warning strong { color: var(--warning); }
+.ov-stat.danger strong { color: var(--danger); }
+
+/* 筛选行: chips + 计数说明 (右) */
+.ov-filter-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 14px;
+}
+
+.ov-filter {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.ov-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 12px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-full);
+  background: transparent;
+  color: var(--text-2);
+  font-size: var(--fs-sm);
+}
+
+.ov-chip strong {
+  font-size: var(--fs-xs);
+  font-variant-numeric: tabular-nums;
+  color: var(--muted);
+}
+
+.ov-chip:hover:not(.active) {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.ov-chip.active {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+}
+
+.ov-chip.active strong {
+  color: var(--accent);
+}
+
+/* 表单错误提示 (隧道表单尾) */
+#wz-error {
+  color: var(--danger);
+}
+
+/* 空态卡片内的动作行 */
+#tunnel-empty .actions {
+  margin-top: 10px;
 }

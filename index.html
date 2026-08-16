@@ -68,14 +68,17 @@
               <h2>总览</h2>
               <p>全部隧道的状态总账 —— 反向 <code>ssh -R</code> / 本地 <code>ssh -L</code> / 动态 <code>ssh -D</code>，断线自动重连</p>
             </header>
-            <div class="list-head">
-              <span class="hint" id="tunnel-count"></span>
+            <div id="ov-stats" class="ov-stats"></div>
+            <div id="ov-filter-row" class="ov-filter-row">
+              <div id="ov-filter" class="ov-filter"></div>
+              <span class="hint tight" id="tunnel-count"></span>
             </div>
+            <div id="ov-no-match" class="hint tight hidden">没有符合当前筛选的隧道</div>
             <div id="tunnel-empty" class="card hidden">
-              <div class="hint" style="min-height: 0; margin: 4px 0">
+              <div class="hint tight">
                 还没有隧道。到「服务器」页选择服务器，从场景开始 —— 服务器借 VPN 出网、暴露本地服务、访问服务器内网……
               </div>
-              <div class="actions" style="margin-top: 10px">
+              <div class="actions">
                 <button type="button" id="goto-servers" class="primary">去服务器页</button>
               </div>
             </div>
@@ -114,7 +117,7 @@
                   <input id="def-maxsessions" type="number" value="10" min="2" max="128" />
                 </label>
               </div>
-              <div class="hint" style="min-height: 0; margin: 4px 0">
+              <div class="hint tight">
                 共享连接与 MaxSessions 对全部隧道在<b>启动时</b>生效（服务器表单可按服务器覆盖共享开关）；
                 服务器 sshd 的 MaxSessions（默认 10）计入转发通道，预算将满时新隧道自动改用独立连接并在日志告警。
               </div>
@@ -189,7 +192,7 @@
                 <span>私钥路径 (选填)</span>
                 <input id="profile-key" type="text" placeholder="C:\Users\you\.ssh\id_ed25519" />
               </label>
-              <div class="hint" style="min-height: 0; margin: 4px 0">
+              <div class="hint tight">
                 填写私钥路径则用密钥认证 (公钥需已加入服务器 authorized_keys)，密码框此时充当密钥口令；留空用密码认证。
               </div>
               <label>
@@ -217,7 +220,7 @@
               <div id="my-scenarios-wrap">
                 <div class="field-title">我的场景</div>
                 <div id="scenario-cards" class="preset-grid one"></div>
-                <div id="scenario-empty-hint" class="hint" style="min-height: 0">
+                <div id="scenario-empty-hint" class="hint tight">
                   还没有保存的场景 —— 建隧道时勾选「存为我的场景」，或隧道行点「存为场景」。
                 </div>
               </div>
@@ -274,7 +277,7 @@
                 <button type="button" id="wz-save">仅保存</button>
                 <button type="submit" class="primary">保存并启动</button>
               </div>
-              <div class="hint" id="wz-error" style="color: var(--danger)"></div>
+              <div class="hint" id="wz-error"></div>
             </form>
 
           </aside>
