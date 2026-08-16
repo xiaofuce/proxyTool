@@ -138,6 +138,7 @@ pub(super) async fn run_task(
             &spec,
             &creds,
             &slot,
+            &stop,
             &state_tx,
             &events,
             &logger,
@@ -196,14 +197,14 @@ pub(super) async fn run_task(
 /// 会话句柄填入共享槽 (注册表据此硬断开), 结束时清槽。
 /// `connected_at`: 进入 Running 时写入 (alive_reset 判据)。
 ///
-/// 本地/动态: 经 ConnPool 取租约 (share=true 复用同档案连接, false 游离),
+/// 三种形态统一经 ConnPool 取租约 (share=true 复用同档案连接, false 游离),
 /// attempt 结束显式 `lease.close()` (共享 = 末位才断连; 游离 = 立即断连)。
-/// 反向: 仍是专用连接路径 (start_tunnel 自建自连), 共享接入在 C3。
 #[allow(clippy::too_many_arguments)]
 async fn attempt(
     spec: &TunnelSpec,
     creds: &SshCreds,
     slot: &SessionSlot,
+    stop: &Arc<AtomicBool>,
     state_tx: &watch::Sender<TunnelState>,
     events: &Arc<dyn TunnelEvents>,
     logger: &Logger,
@@ -236,7 +237,7 @@ async fn attempt(
                 keepalive,
                 known_hosts: known_hosts.clone(),
             };
-            // start_tunnel 回调: Connected → Running; BoundPort → 注册表回填
+            // start_tunnel_on 回调: Connected → Running; BoundPort → 注册表回填
             let st = state_tx.clone();
             let ev = events.clone();
             let id2 = id.clone();
@@ -253,8 +254,24 @@ async fn attempt(
             let SessionSlot::Reverse(rslot) = slot else {
                 unreachable!("反向隧道配反向会话槽");
             };
-            let r = tunnel::start_tunnel(rslot.clone(), cfg, logger.clone(), on_event).await;
-            *rslot.lock().await = None;
+            let lease = pool
+                .acquire(&spec.profile_id, &id, creds, keepalive, known_hosts, logger)
+                .await?;
+            let r = tunnel::start_tunnel_on(
+                rslot.clone(),
+                lease.state(),
+                cfg,
+                logger.clone(),
+                on_event,
+                stop,
+            )
+            .await;
+            // 会话收尾: 槽内还有会话 = 本任务自己退出 (断线) → 拆除;
+            // 注册表已取走 (用户停止) 则无操作
+            if let Some(sess) = rslot.lock().await.take() {
+                sess.teardown(false).await;
+            }
+            lease.close().await;
             r
         }
         TunnelKind::Local {

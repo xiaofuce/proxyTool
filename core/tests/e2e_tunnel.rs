@@ -17,11 +17,14 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use proxy_tool_core::engine::{Registry, SshCreds};
 use proxy_tool_core::known_hosts::KnownHosts;
+use proxy_tool_core::model::{Backend, ReconnectPolicy, TunnelKind, TunnelSpec, TunnelState};
 use proxy_tool_core::socks::start_socks_server;
 use proxy_tool_core::ssh::AuthMethod;
 use proxy_tool_core::transport::python_bridge;
 use proxy_tool_core::tunnel::{run_tunnel, Logger, TunnelConfig};
+use proxy_tool_core::TunnelEvents;
 use russh::client;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -707,4 +710,162 @@ ss -tln | grep ':{bound} ' || echo NO_LISTEN"
     );
     assert!(!out.contains("NO_LISTEN"), "服务器应在分配端口监听: {out}");
     println!("== 端口 0 动态分配验证通过");
+}
+
+/// 共享连接数据通路 (同档案共享连接落地): Registry 起两条同档案反向隧道
+/// (端口 0, share=true), 服务器侧经两个动态端口各做一次 python socket
+/// echo 往返 —— 共享连接的路由表按端口区分两隧道的转发。被注入的服务器
+/// (libonion) 自动走兼容模式, 同一连接上两个 helper; 干净服务器双标准转发。
+#[tokio::test]
+async fn shared_conn_data_path() {
+    init_logger();
+    let echo_port = start_echo_server().await;
+
+    struct NoEvents;
+    impl TunnelEvents for NoEvents {
+        fn status(&self, _id: &str, _kind: &str, _state: &str, _message: Option<&str>) {}
+        fn log(&self, _id: &str, _kind: &str, _msg: &str) {}
+    }
+
+    let spec = |name: &str| TunnelSpec {
+        id: TunnelSpec::new_id(),
+        name: name.into(),
+        enabled: true,
+        profile_id: "p-e2e-shared".into(),
+        kind: TunnelKind::Reverse {
+            bind: "127.0.0.1".into(),
+            port: 0,
+        },
+        backend: Backend::Tcp("127.0.0.1".into(), echo_port),
+        policy: ReconnectPolicy::default(),
+    };
+    let s1 = spec("共享反向-1");
+    let s2 = spec("共享反向-2");
+    let registry = Registry::new();
+    registry.create(s1.clone()).expect("创建失败");
+    registry.create(s2.clone()).expect("创建失败");
+
+    let c = creds();
+    let engine_creds = SshCreds {
+        host: c.server.clone(),
+        port: c.port,
+        username: c.user.clone(),
+        auth: AuthMethod::Password(pass().into()),
+        share: true,
+        max_sessions: 10,
+    };
+    registry
+        .start(&s1.id, engine_creds.clone(), Arc::new(NoEvents))
+        .await
+        .expect("启动失败");
+    registry
+        .start(&s2.id, engine_creds, Arc::new(NoEvents))
+        .await
+        .expect("启动失败");
+
+    // 等双隧道 Running + 端口回填 (BoundPort → spec)
+    let (p1, p2) = {
+        let mut got = None;
+        for _ in 0..150 {
+            let list = registry.list();
+            let port_of = |id: &str| {
+                list.iter()
+                    .find(|(s, _)| s.id == id)
+                    .and_then(|(s, _)| match &s.kind {
+                        TunnelKind::Reverse { port, .. } if *port != 0 => Some(*port),
+                        _ => None,
+                    })
+            };
+            if let (Some(a), Some(b)) = (port_of(&s1.id), port_of(&s2.id)) {
+                got = Some((a, b));
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        got.expect("等待双隧道 Running/端口回填超时")
+    };
+    println!("== 双隧道动态端口: {p1} / {p2}");
+    assert_ne!(p1, p2, "两条隧道的动态端口应互异");
+
+    // 共享连接: 一条连接服务两条隧道
+    let stats = registry.conn_stats().await;
+    assert_eq!(stats.len(), 1, "应只有一个池条目: {stats:?}");
+    assert_eq!(stats[0].connect_count, 1, "两条隧道只建连一次: {stats:?}");
+    assert_eq!(stats[0].leases.len(), 2);
+
+    // 数据通路: 服务器 python socket → 两端口 → 隧道 → 本机 echo → 回读
+    // (python socket send 路径, 与 curl 一致无注入问题)
+    let exec_h = connect_exec_handle().await;
+    let cmd = "exec 2>&1
+python3 - <<'PYEOF'
+import socket
+def probe(port,tag):
+ try:
+  s=socket.create_connection((\"127.0.0.1\",port),timeout=20)
+  s.settimeout(20)
+  s.sendall((\"PING-\"+tag).encode())
+  d=b\"\"
+  while len(d)<len(tag)+5:
+   x=s.recv(65536)
+   if not x: break
+   d+=x
+  s.close()
+  print(tag,\"ECHO_OK\" if d==(\"PING-\"+tag).encode() else \"MISMATCH \"+repr(d[:48]))
+ except Exception as e:
+  print(tag,\"EXC\",repr(e))
+probe({p1},\"A\")
+probe({p2},\"B\")
+PYEOF"
+        .replace("{p1}", &p1.to_string())
+        .replace("{p2}", &p2.to_string());
+    let out = exec_timeout(&exec_h, &cmd, Duration::from_secs(60)).await;
+    println!("--- 共享连接双端口通路 ---\n{out}");
+    assert!(
+        out.contains("A ECHO_OK") && out.contains("B ECHO_OK"),
+        "两端口应各自完整往返 (echo): {out}"
+    );
+
+    // 停一留一: 共享连接保持 (兄弟租约仍在), 兄弟端口仍通, 停者端口释放
+    registry.stop(&s1.id).await.expect("停止失败");
+    for _ in 0..150 {
+        let stopped = registry
+            .list()
+            .iter()
+            .any(|(s, st)| s.id == s1.id && *st == TunnelState::Stopped);
+        if stopped {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let cmd2 = "exec 2>&1
+python3 - <<'PYEOF'
+import socket
+s=socket.create_connection((\"127.0.0.1\",{p2}),timeout=20)
+s.settimeout(20)
+s.sendall(b\"PING-AGAIN\")
+d=b\"\"
+while len(d)<10:
+ x=s.recv(65536)
+ if not x: break
+ d+=x
+s.close()
+print(\"STILL_OK\" if d==b\"PING-AGAIN\" else \"MISMATCH \"+repr(d[:48]))
+PYEOF"
+        .replace("{p2}", &p2.to_string());
+    let out2 = exec_timeout(&exec_h, &cmd2, Duration::from_secs(40)).await;
+    println!("--- 停一留一后兄弟端口通路 ---\n{out2}");
+    assert!(out2.contains("STILL_OK"), "兄弟端口应仍可用: {out2}");
+
+    let diag = exec(
+        &exec_h,
+        &format!("sleep 1; ss -tln | grep ':{p1} ' && echo STILL || echo FREED"),
+    )
+    .await;
+    assert!(diag.contains("FREED"), "停止者端口应释放: {diag}");
+
+    let stats = registry.conn_stats().await;
+    assert_eq!(stats[0].leases.len(), 1, "停一后剩一条租约: {stats:?}");
+
+    registry.stop(&s2.id).await.expect("停止失败");
+    println!("== 共享连接数据通路验证通过");
 }

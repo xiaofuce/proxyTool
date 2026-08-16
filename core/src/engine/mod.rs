@@ -62,12 +62,12 @@ impl SessionSlot {
 
     /// 硬断开当前会话 (无会话则无操作)。
     /// `force`: 模拟网络掉线 —— 共享连接也整连断开 (成员各自重连);
-    /// false = 用户停止语义, 共享连接只停本隧道。
+    /// false = 用户停止语义, 共享连接只拆本隧道的转发/助手。
     async fn close_current(&self, force: bool) {
         match self {
             SessionSlot::Reverse(slot) => {
                 if let Some(session) = slot.lock().await.take() {
-                    crate::tunnel::close_session(&session).await;
+                    session.teardown(force).await;
                 }
             }
             SessionSlot::Direct(slot) => {

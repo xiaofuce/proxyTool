@@ -22,9 +22,9 @@ use crate::tunnel::{TunnelConfig, TunnelSession};
 
 /// 兼容模式会话: helper 通道两个后台任务的句柄 (租约拆除用)。
 /// abort 任务 -> 通道两半随任务结束 drop (ChannelCloseOnDrop -> CHANNEL_CLOSE)
-/// -> helper stdin EOF 自行退出。
-/// (C1 阶段尚无调用方 —— 反向隧道共享接入租约拆除时启用, 届时移除 allow)
-#[allow(dead_code)]
+/// -> helper stdin EOF 自行退出。Clone 浅共享 (槽内会话/轮询循环各持一份,
+/// abort 幂等)。
+#[derive(Clone)]
 pub(crate) struct CompatSession {
     pub(crate) reader: tokio::task::AbortHandle,
     pub(crate) forwarder: tokio::task::AbortHandle,
@@ -33,7 +33,6 @@ pub(crate) struct CompatSession {
 impl CompatSession {
     /// 拆除本隧道的兼容模式 (不动所在连接): abort 后台任务即可,
     /// 通道计数由内置的收尾任务在两任务结束后递减。
-    #[allow(dead_code)]
     pub(crate) fn stop(self) {
         self.forwarder.abort();
         self.reader.abort();

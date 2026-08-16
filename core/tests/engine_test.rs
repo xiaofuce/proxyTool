@@ -606,6 +606,169 @@ async fn dedicated_when_share_off() {
     wait_state(&registry, &s2.id, |s| matches!(s, TunnelState::Stopped)).await;
 }
 
+/// 反向隧道 spec (端口 0 动态分配; 落地指向本机不存在端口也无妨 ——
+/// Running 判定只看转发建立, 不看落地数据)
+fn reverse_spec(profile: &str) -> TunnelSpec {
+    TunnelSpec {
+        id: TunnelSpec::new_id(),
+        name: "引擎测试-反向".into(),
+        enabled: true,
+        profile_id: profile.into(),
+        kind: TunnelKind::Reverse {
+            bind: "127.0.0.1".into(),
+            port: 0,
+        },
+        backend: Backend::Tcp("127.0.0.1".into(), 59999),
+        policy: ReconnectPolicy::default(),
+    }
+}
+
+/// 从注册表读回填后的反向端口 (BoundPort 回填 spec)
+fn reverse_port_of(registry: &Registry, id: &str) -> u16 {
+    match registry.list().iter().find(|(s, _)| &s.id == id) {
+        Some((s, _)) => match &s.kind {
+            TunnelKind::Reverse { port, .. } => *port,
+            _ => panic!("预期 Reverse 形态"),
+        },
+        None => panic!("隧道不存在: {id}"),
+    }
+}
+
+/// 同档案两条反向隧道 (端口 0) 共享一条连接: 双 Running、动态端口互异、
+/// 池 1 条目 / 建连 1 次 / 2 租约
+#[tokio::test]
+async fn shared_reverse_two_tunnels() {
+    let registry = Registry::new();
+    let events: Arc<dyn TunnelEvents> = Arc::new(Collector::default());
+    let s1 = reverse_spec("p-rev-share");
+    let s2 = reverse_spec("p-rev-share");
+    registry.create(s1.clone()).expect("创建失败");
+    registry.create(s2.clone()).expect("创建失败");
+
+    registry
+        .start(&s1.id, creds(), events.clone())
+        .await
+        .expect("启动失败");
+    registry
+        .start(&s2.id, creds(), events.clone())
+        .await
+        .expect("启动失败");
+    wait_state(&registry, &s1.id, |s| matches!(s, TunnelState::Running)).await;
+    wait_state(&registry, &s2.id, |s| matches!(s, TunnelState::Running)).await;
+
+    // 端口 0 动态分配: 两条各自回填, 互不相同
+    let (p1, p2) = (
+        reverse_port_of(&registry, &s1.id),
+        reverse_port_of(&registry, &s2.id),
+    );
+    assert!(p1 != 0 && p2 != 0, "端口应已回填: {p1} {p2}");
+    assert_ne!(p1, p2, "两条隧道的动态端口应互异");
+
+    let stats = registry.conn_stats().await;
+    assert_eq!(stats.len(), 1, "同档案应只有一个池条目: {stats:?}");
+    assert_eq!(stats[0].connect_count, 1, "两条反向隧道只建连一次");
+    assert_eq!(stats[0].leases.len(), 2, "两条租约: {stats:?}");
+
+    registry.stop(&s1.id).await.expect("停止失败");
+    wait_state(&registry, &s1.id, |s| matches!(s, TunnelState::Stopped)).await;
+    let stats = registry.conn_stats().await;
+    assert_eq!(stats[0].leases.len(), 1, "停一条后剩一条租约: {stats:?}");
+    assert!(
+        matches!(
+            registry.list().iter().find(|(s, _)| s.id == s2.id),
+            Some((_, TunnelState::Running))
+        ),
+        "兄弟反向隧道应保持 Running"
+    );
+
+    registry.stop(&s2.id).await.expect("停止失败");
+    wait_state(&registry, &s2.id, |s| matches!(s, TunnelState::Stopped)).await;
+}
+
+/// 停止反向隧道释放服务器端口 (cancel 转发 / 助手退出), 兄弟端口不受影响
+#[tokio::test]
+async fn stop_reverse_releases_port() {
+    let registry = Registry::new();
+    let events: Arc<dyn TunnelEvents> = Arc::new(Collector::default());
+    let s1 = reverse_spec("p-rev-release");
+    let s2 = reverse_spec("p-rev-release");
+    registry.create(s1.clone()).expect("创建失败");
+    registry.create(s2.clone()).expect("创建失败");
+    registry
+        .start(&s1.id, creds(), events.clone())
+        .await
+        .expect("启动失败");
+    registry
+        .start(&s2.id, creds(), events.clone())
+        .await
+        .expect("启动失败");
+    wait_state(&registry, &s1.id, |s| matches!(s, TunnelState::Running)).await;
+    wait_state(&registry, &s2.id, |s| matches!(s, TunnelState::Running)).await;
+    let (p1, p2) = (
+        reverse_port_of(&registry, &s1.id),
+        reverse_port_of(&registry, &s2.id),
+    );
+
+    // 双端口都在监听
+    assert!(
+        ss_listening(registry.known_hosts(), p1).await,
+        "p1 应在监听"
+    );
+    assert!(
+        ss_listening(registry.known_hosts(), p2).await,
+        "p2 应在监听"
+    );
+
+    // 停 s1: 其端口释放 (标准模式 cancel / 兼容模式助手退出), p2 保持
+    registry.stop(&s1.id).await.expect("停止失败");
+    wait_state(&registry, &s1.id, |s| matches!(s, TunnelState::Stopped)).await;
+    let mut released = false;
+    for _ in 0..20 {
+        if !ss_listening(registry.known_hosts(), p1).await {
+            released = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    assert!(released, "停止后服务器端口 {p1} 应释放");
+    assert!(
+        ss_listening(registry.known_hosts(), p2).await,
+        "兄弟端口 {p2} 应保持监听"
+    );
+
+    registry.stop(&s2.id).await.expect("停止失败");
+    wait_state(&registry, &s2.id, |s| matches!(s, TunnelState::Stopped)).await;
+}
+
+/// 服务器侧检查端口是否在监听 (经 remote_exec 独立连接, TOFU 共享注册表)。
+/// 注: sshd 对 localhost 双栈绑定 (127.0.0.1 + [::1]), 一条转发 = 2 行,
+/// 判定用「匹配行数 ≥ 1」而非恰等于 1。
+async fn ss_listening_raw(
+    known_hosts: &Arc<proxy_tool_core::known_hosts::KnownHosts>,
+    port: u16,
+) -> usize {
+    let c = proxy_tool_core::creds::load();
+    let out = proxy_tool_core::ssh::remote_exec(
+        &c.server,
+        c.port,
+        &c.user,
+        &AuthMethod::Password(c.pass.clone()),
+        &format!("ss -tln | grep -c ':{port} ' || true"),
+        Duration::from_secs(15),
+        known_hosts,
+    )
+    .await
+    .unwrap_or_else(|e| panic!("remote_exec 失败: {e}"));
+    out.trim().parse::<usize>().unwrap_or(0)
+}
+
+async fn ss_listening(
+    known_hosts: &Arc<proxy_tool_core::known_hosts::KnownHosts>,
+    port: u16,
+) -> bool {
+    ss_listening_raw(known_hosts, port).await >= 1
+}
+
 /// 立即重试: 退避等待期间置 retry_now → 跳过剩余等待马上发起新尝试
 #[tokio::test]
 async fn retry_now_skips_backoff_wait() {
