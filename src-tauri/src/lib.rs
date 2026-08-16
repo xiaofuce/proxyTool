@@ -36,6 +36,9 @@ use tauri::Manager;
 use tauri_plugin_autostart::ManagerExt;
 use tokio::sync::Mutex;
 
+/// R9 诊断: 滚动文件日志 + 内存自监控 + 诊断包导出
+mod diag;
+
 /// 共享应用状态: 隧道注册表 + 服务器档案 (store v2)。
 /// 会话槽/重连循环/内置 SOCKS 生命周期都在 core 引擎里, 这里只持有注册表。
 pub struct AppState {
@@ -87,6 +90,16 @@ impl TunnelEvents for TauriEmitter {
                 message: message.map(|m| m.into()),
             },
         );
+        // R9 双写: 状态迁移落文件日志 (前端面板 500 行环形缓冲, 重启即清零)
+        let tag = format!("tunnel:{}", &id[..id.len().min(8)]);
+        diag::log(
+            if state == "error" { "error" } else { "info" },
+            &tag,
+            &match message {
+                Some(m) => format!("状态 → {state} | {m}"),
+                None => format!("状态 → {state}"),
+            },
+        );
         // 凭据失效即作废记住的密码 (与前端会话缓存逐出同语义):
         // 认证被拒 / 私钥加载失败(口令不对) → 删掉加密落盘的那份,
         // 下次启动重新询问, 不静默复用坏凭据。事件是同步回调 → spawn 处理。
@@ -114,7 +127,7 @@ impl TunnelEvents for TauriEmitter {
                     };
                     if let Ok(dir) = data_dir(&app) {
                         if let Err(e) = persist(dir, snapshot, secrets::save_secret_store).await {
-                            eprintln!("[secrets] 保存失败: {e}");
+                            diag::log("error", "secrets", &format!("保存失败: {e}"));
                         }
                     }
                 });
@@ -123,6 +136,12 @@ impl TunnelEvents for TauriEmitter {
     }
     fn log(&self, id: &str, kind: &str, msg: &str) {
         use tauri::Emitter;
+        // R9 双写: 隧道日志同时落文件 (级别判定与前端 logLevel 同语义)
+        diag::log(
+            diag::level_of(msg),
+            &format!("tunnel:{}", &id[..id.len().min(8)]),
+            msg,
+        );
         let _ = self.0.emit(
             "tunnel-log",
             &LogPayload {
@@ -324,7 +343,7 @@ async fn tunnel_start(
                 guard.clone()
             };
             if let Err(e) = persist(data_dir(&app)?, snapshot, secrets::save_secret_store).await {
-                eprintln!("[secrets] 保存失败: {e}");
+                diag::log("error", "secrets", &format!("保存失败: {e}"));
             }
         }
     }
@@ -811,7 +830,7 @@ async fn delete_profile(
     };
     if let Some(snapshot) = secrets_snapshot {
         if let Err(e) = persist(data_dir(&app)?, snapshot, secrets::save_secret_store).await {
-            eprintln!("[secrets] 保存失败: {e}");
+            diag::log("error", "secrets", &format!("保存失败: {e}"));
         }
     }
     // 连带停止并删除关联隧道 (运行中的先停, 否则引擎任务残留占端口,
@@ -819,7 +838,11 @@ async fn delete_profile(
     for (spec, _) in state.registry.list() {
         if spec.profile_id == id {
             if let Err(e) = state.registry.delete(&spec.id).await {
-                eprintln!("[delete_profile] 停止/删除隧道 {} 失败: {e}", spec.id);
+                diag::log(
+                    "error",
+                    "delete_profile",
+                    &format!("停止/删除隧道 {} 失败: {e}", spec.id),
+                );
             }
         }
     }
@@ -902,6 +925,65 @@ fn toggle_main_window(app: &tauri::AppHandle) {
 
 /// 建托盘: 菜单 (显示/退出) + 左键切换窗口显隐。
 /// 关闭按钮 = 收进托盘 (隧道常驻), 真正退出走托盘菜单「退出」。
+// ---------- 诊断 (R9: 文件日志 / 诊断包) ----------
+
+/// 命令: 打开日志目录 (explorer/finder)
+#[tauri::command]
+async fn open_logs_dir(app: tauri::AppHandle) -> Result<(), String> {
+    let dir = data_dir(&app)?.join("logs");
+    std::fs::create_dir_all(&dir).map_err(|e| format!("创建日志目录失败: {e}"))?;
+    use tauri_plugin_opener::OpenerExt;
+    app.opener()
+        .open_path(dir.to_string_lossy().as_ref(), None::<&str>)
+        .map_err(|e| format!("打开目录失败: {e}"))
+}
+
+/// 命令: 导出诊断包 (运行时摘要 + 全部轮转日志) 到 logs 目录并揭示。
+/// 摘要只含隧道名/形态/状态与连接池计数 —— 不含主机地址与凭据 (红线)。
+#[tauri::command]
+async fn diag_export(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+) -> Result<String, String> {
+    let logs = data_dir(&app)?.join("logs");
+    std::fs::create_dir_all(&logs).map_err(|e| format!("创建日志目录失败: {e}"))?;
+
+    let mut summary = String::from("==== 运行时摘要 ====\n");
+    for (spec, st) in state.registry.list() {
+        let (state_name, msg) = state_to_dto(&st);
+        summary.push_str(&format!(
+            "- 隧道「{}」[{}] 状态: {}{}\n",
+            spec.name,
+            spec.kind.tag(),
+            state_name,
+            msg.map(|m| format!(" | {m}")).unwrap_or_default()
+        ));
+    }
+    for cs in state.registry.conn_stats().await {
+        summary.push_str(&format!(
+            "- 共享连接 [{}] 代际 {} 建连 {} 次, 活跃通道 {}, 租约 {}\n",
+            &cs.profile_id[..cs.profile_id.len().min(8)],
+            cs.generation,
+            cs.connect_count,
+            cs.open_channels,
+            cs.leases.len()
+        ));
+    }
+    if let Some(rss) = diag::rss_bytes() {
+        summary.push_str(&format!("当前内存 RSS: {}\n", diag::fmt_mb(rss)));
+    }
+
+    let ts = chrono::Local::now().format("%Y%m%d-%H%M%S");
+    let dest = logs.join(format!("diag-{ts}.txt"));
+    diag::export_bundle(&logs, &dest, &summary).map_err(|e| format!("导出失败: {e}"))?;
+    // 磁盘占用上限: 诊断包只留最近 3 份 (单个含全部轮转日志, 不清理会累积)
+    diag::prune_bundles(&logs, 3);
+
+    use tauri_plugin_opener::OpenerExt;
+    let _ = app.opener().reveal_item_in_dir(&dest);
+    Ok(dest.to_string_lossy().into_owned())
+}
+
 fn setup_tray(app: &tauri::AppHandle) -> Result<(), Box<dyn std::error::Error>> {
     use tauri::menu::{Menu, MenuItem};
     use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
@@ -946,20 +1028,48 @@ pub fn run() {
             std::fs::create_dir_all(&dir)
                 .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
 
+            // R9 诊断: 文件日志 + panic hook。
+            // release GUI 进程被 windows_subsystem="windows" 吞掉 stdout/stderr,
+            // 不落文件的话 eprintln/panic 全部静默丢失。
+            diag::init(&dir);
+            diag::install_panic_hook();
+
             // 档案: v1 (裸数组) 首启动自动迁移到 v2, 旧档案无损带入
             let profile_store = store::load_profiles(&dir);
             if store::migrate_needed(&dir) {
                 store::save_profiles(&dir, &profile_store)
                     .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
-                println!("[setup] profiles.json 已迁移到 v2");
+                diag::log("info", "setup", "profiles.json 已迁移到 v2");
             }
 
             // 隧道列表: 恢复配置 (凭据不落盘, 不自动启动)
             let registry = Registry::persistent(dir.clone());
+            // tunnels.json 落盘失败转发到文件日志 (原 eprintln 在 release 不可见)
+            registry.set_diag_logger(std::sync::Arc::new(|msg: &str| {
+                diag::log("error", "registry", msg);
+            }));
             let restored = registry.restore();
             if !restored.is_empty() {
-                println!("[setup] 已恢复 {} 条隧道配置", restored.len());
+                diag::log(
+                    "info",
+                    "setup",
+                    &format!("已恢复 {} 条隧道配置", restored.len()),
+                );
             }
+
+            // R9 内存自监控: 每 5 分钟 RSS 落日志 (泄漏趋势一条线看穿)
+            tauri::async_runtime::spawn(async {
+                let mut tick =
+                    tokio::time::interval(std::time::Duration::from_secs(300));
+                tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+                tick.tick().await; // interval 首拍立即到, 跳过 (启动 RSS 已记)
+                loop {
+                    tick.tick().await;
+                    if let Some(rss) = diag::rss_bytes() {
+                        diag::log("info", "mem", &format!("内存 RSS: {}", diag::fmt_mb(rss)));
+                    }
+                }
+            });
 
             app.manage(AppState {
                 registry,
@@ -988,7 +1098,11 @@ pub fn run() {
                         .filter(|(s, _)| s.enabled)
                         .map(|(s, _)| s.id)
                         .collect();
-                    println!("[setup] 开机自启: {} 条 enabled 隧道", enabled_ids.len());
+                    diag::log(
+                        "info",
+                        "setup",
+                        &format!("开机自启: {} 条 enabled 隧道", enabled_ids.len()),
+                    );
                     for id in enabled_ids {
                         if let Err(e) = start_by_profile(&app, &id, None).await {
                             events_log(&app, &id, &format!("开机自启失败: {e}"));
@@ -1053,6 +1167,8 @@ pub fn run() {
             known_hosts_forget,
             autostart_get,
             autostart_set,
+            open_logs_dir,
+            diag_export,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

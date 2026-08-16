@@ -18,6 +18,7 @@ use tokio::sync::{watch, Mutex as AsyncMutex};
 use crate::backend::BackendPool;
 use crate::known_hosts::KnownHosts;
 use crate::model::{TunnelKind, TunnelSpec, TunnelState};
+use crate::ssh;
 use crate::store;
 use crate::TunnelEvents;
 
@@ -142,6 +143,8 @@ pub struct Registry {
     known_hosts: Arc<KnownHosts>,
     /// 同档案共享连接池 (share=true 的隧道按 profile_id 复用连接)
     pool: Arc<ConnPool>,
+    /// 诊断回调 (R9: GUI 注入 → tunnels.json 落盘失败写文件日志; 缺省 eprintln)
+    diag_logger: Mutex<Option<ssh::Logger>>,
 }
 
 /// 按创建顺序取全部 spec (list/落盘共用)
@@ -150,6 +153,16 @@ fn specs_in_order(order: &[String], entries: &HashMap<String, Entry>) -> Vec<Tun
         .iter()
         .filter_map(|id| entries.get(id).map(|e| e.spec.clone()))
         .collect()
+}
+
+/// 诊断输出: 有回调走回调 (GUI → 文件日志), 缺省 eprintln (测试/headless)。
+/// 独立成自由函数: bound_port_updater 的闭包不能捕获 &self
+/// (会传染给返回的 Arc<dyn Fn> 生命周期), 需先 clone 出 Option<Logger>。
+fn diag_emit(logger: &Option<ssh::Logger>, msg: &str) {
+    match logger {
+        Some(l) => l(msg),
+        None => eprintln!("{msg}"),
+    }
 }
 
 impl Registry {
@@ -162,6 +175,7 @@ impl Registry {
             backend: Arc::new(BackendPool::new()),
             known_hosts: KnownHosts::in_memory(),
             pool: Arc::new(ConnPool::new()),
+            diag_logger: Mutex::new(None),
         }
     }
 
@@ -175,7 +189,18 @@ impl Registry {
             backend: Arc::new(BackendPool::new()),
             known_hosts,
             pool: Arc::new(ConnPool::new()),
+            diag_logger: Mutex::new(None),
         }
+    }
+
+    /// 注入诊断回调: tunnels.json 落盘失败等关键错误转发给 GUI 文件日志
+    /// (release GUI 进程无 stderr, 纯 eprintln 等于静默丢失)
+    pub fn set_diag_logger(&self, logger: ssh::Logger) {
+        *self.diag_logger.lock().unwrap() = Some(logger);
+    }
+
+    fn diag(&self, msg: &str) {
+        diag_emit(&self.diag_logger.lock().unwrap().clone(), msg);
     }
 
     /// 主机密钥记忆库 (TOFU 校验 / UI 列表与清除)
@@ -332,6 +357,8 @@ impl Registry {
         let dir = self.dir.clone();
         let id = id.to_string();
         let events = events.clone();
+        // 诊断回调 clone 出来: 闭包捕获 &self 会传染 Arc<dyn Fn> 生命周期
+        let diag_logger = self.diag_logger.lock().unwrap().clone();
         Arc::new(move |port: u16| {
             let changed = {
                 let mut map = entries.lock().unwrap();
@@ -354,7 +381,10 @@ impl Registry {
                         specs_in_order(&order, &map)
                     };
                     if let Err(e) = store::save_tunnels(dir, &specs) {
-                        eprintln!("[registry] tunnels.json 保存失败: {e}");
+                        diag_emit(
+                            &diag_logger,
+                            &format!("[registry] tunnels.json 保存失败: {e}"),
+                        );
                     }
                 }
                 events.log(
@@ -405,7 +435,7 @@ impl Registry {
         };
         if let Err(e) = store::save_tunnels(dir, &specs) {
             // 持久化失败不阻断运行, 但必须可见 (下次启动列表会丢失)
-            eprintln!("[registry] tunnels.json 保存失败: {e}");
+            self.diag(&format!("[registry] tunnels.json 保存失败: {e}"));
         }
     }
 }

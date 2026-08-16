@@ -44,6 +44,16 @@ const zh = {
   "set.autostartHint":
     "启动后隐藏到托盘（点击托盘图标显示主窗口，关闭按钮也是收进托盘）。需同时勾选隧道行的「自启」，且档案为<b>未加密私钥</b>认证，隧道才会免交互自动连接；密码认证的隧道需打开窗口手动启动。",
 
+  // ---- 诊断卡 (R9) ----
+  "set.diag": "诊断",
+  "set.diagSub": "日志 · 内存 · 反馈",
+  "set.diagHint":
+    "运行日志自动保存于本机（不含密码），断线重连、内存占用等都会记录；如遇异常可导出诊断包发给开发者定位问题。",
+  "set.diagOpen": "打开日志目录",
+  "set.diagExport": "导出诊断包",
+  "set.diagExporting": "正在导出…",
+  "set.diagExported": "诊断包已导出：{file}",
+
   // ---- 命令生成页 ----
   "cmdgen.head": "命令生成",
   "cmdgen.lead":
@@ -453,6 +463,16 @@ const en: { [K in I18nKey]: string } = {
   "set.autostartLabel": "Run proxyTool automatically when the system starts",
   "set.autostartHint":
     "Starts hidden in the tray (click the tray icon to show the window; the close button also minimizes to tray). Tunnels connect non-interactively only if their row's \"Auto-start\" is checked and the profile authenticates with an <b>unencrypted private key</b>; password tunnels need the window opened to start manually.",
+
+  // ---- diagnostics card (R9) ----
+  "set.diag": "Diagnostics",
+  "set.diagSub": "Logs · Memory · Feedback",
+  "set.diagHint":
+    "Run logs are saved locally (no passwords) — reconnects, memory usage and more are recorded. If something misbehaves, export a diagnostics bundle and send it to the developer.",
+  "set.diagOpen": "Open log folder",
+  "set.diagExport": "Export diagnostics",
+  "set.diagExporting": "Exporting…",
+  "set.diagExported": "Diagnostics exported: {file}",
 
   // ---- command builder page ----
   "cmdgen.head": "Command Builder",

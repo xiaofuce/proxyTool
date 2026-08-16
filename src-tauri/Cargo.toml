@@ -33,3 +33,6 @@ serde = { version = "1", features = ["derive"] }
 # 隧道引擎 (russh/tokio 等依赖都在 core, GUI 层只做桥接)
 proxy-tool-core = { path = "../core" }
 tokio = { version = "1", features = ["sync", "time"] }
+# R9 诊断: 日志时间戳 (已在依赖树, 零新增编译) + 进程内存采样 (跨平台, 轻量)
+chrono = "0.4"
+memory-stats = "1"

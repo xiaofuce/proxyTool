@@ -2266,6 +2266,31 @@ async function loadAutostart() {
   }
 }
 
+// ---------- 诊断 (R9: 文件日志目录 / 诊断包导出) ----------
+el<HTMLButtonElement>("diag-open").addEventListener("click", async () => {
+  try {
+    await invoke("open_logs_dir");
+  } catch (err) {
+    toast(String(err), "error");
+  }
+});
+
+el<HTMLButtonElement>("diag-export").addEventListener("click", (e) =>
+  withLoading(
+    e.currentTarget as HTMLButtonElement,
+    async () => {
+      try {
+        const path = await invoke<string>("diag_export");
+        const name = path.split(/[\\/]/).pop() || path;
+        toast(t("set.diagExported", { file: name }));
+      } catch (err) {
+        toast(String(err), "error");
+      }
+    },
+    t("set.diagExporting"),
+  ),
+);
+
 // ---------- 语言切换 (设置页「外观」卡; zh/en 双语) ----------
 /** 语言分段控件: 初态高亮 + 点击切换 (偏好落 pt-lang, 与主题/字号同机制) */
 function initLang() {
