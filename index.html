@@ -140,36 +140,43 @@
           <section class="page" data-page="tools">
             <header class="page-head">
               <h2>命令生成</h2>
-              <p>为<b>服务器 ↔ 服务器</b>的隧道生成命令 —— 在服务器 A 上执行、经 SSH 到目标 B，不经过本机</p>
+              <p>填好参数，拼出一条 ssh 命令。把命令拿到<b>服务器 A</b> 上一运行，A 就和目标服务器 <b>B</b> 打通了 —— 你的电脑只负责生成命令，不经手流量。</p>
             </header>
 
             <div class="card">
               <h3>选参数</h3>
 
+              <div class="cg-saved">
+                <span class="cg-saved-label">我的命令</span>
+                <select id="cg-recipes"></select>
+                <button type="button" id="cg-save">存为命令</button>
+                <button type="button" id="cg-del" class="danger">删除</button>
+              </div>
+
               <label>
-                <span>SSH 目标 (B)</span>
+                <span>SSH 连到哪台服务器 (B)</span>
                 <select id="cg-profile"></select>
               </label>
               <div class="form-grid">
                 <label>
-                  <span>地址</span>
+                  <span>B 的地址</span>
                   <input id="cg-host" type="text" placeholder="10.0.0.8" />
                 </label>
                 <label>
-                  <span>端口</span>
+                  <span>B 的 SSH 端口</span>
                   <input id="cg-port" type="number" value="22" min="1" max="65535" />
                 </label>
                 <label>
-                  <span>用户名</span>
+                  <span>登录 B 的用户名</span>
                   <input id="cg-user" type="text" placeholder="root" />
                 </label>
               </div>
 
               <div class="field-title">隧道形态</div>
               <div class="seg" id="cg-kind">
-                <label class="seg-item"><input type="radio" name="cg-kind" value="local" checked /><span>本地 -L · 访问 B 侧</span></label>
-                <label class="seg-item"><input type="radio" name="cg-kind" value="reverse" /><span>反向 -R · 暴露 A 侧</span></label>
-                <label class="seg-item"><input type="radio" name="cg-kind" value="dynamic" /><span>动态 -D · SOCKS5</span></label>
+                <label class="seg-item"><input type="radio" name="cg-kind" value="local" checked /><span>-L · A 访问 B 那边</span></label>
+                <label class="seg-item"><input type="radio" name="cg-kind" value="reverse" /><span>-R · B 访问 A 这边</span></label>
+                <label class="seg-item"><input type="radio" name="cg-kind" value="dynamic" /><span>-D · A 借 B 当代理</span></label>
               </div>
 
               <div class="form-grid">
@@ -190,7 +197,7 @@
               </div>
               <label class="check-label">
                 <input type="checkbox" id="cg-bind" />
-                <span>监听 0.0.0.0（同网段其他机器可连）</span>
+                <span>监听 0.0.0.0（同一网络里的其他机器也能连）</span>
               </label>
             </div>
 
@@ -206,10 +213,10 @@
                 </div>
                 <pre class="cmd-text" id="cg-ssh"></pre>
                 <dl class="cmd-notes">
-                  <dt>-N</dt><dd>只转发端口，不打开远程 shell</dd>
-                  <dt>-L / -R / -D</dt><dd>转发方向，见上面图示</dd>
-                  <dt>ExitOnForwardFailure=yes</dt><dd>端口转发没建立成功就退出，避免「连着但没转发」</dd>
-                  <dt>ServerAliveInterval / CountMax</dt><dd>每 30 秒探测一次，连续 3 次无响应判定断线</dd>
+                  <dt>-N</dt><dd>只做端口转发，不在远端开终端</dd>
+                  <dt>-L / -R / -D</dt><dd>三种转发方向，区别看上面的图</dd>
+                  <dt>ExitOnForwardFailure=yes</dt><dd>端口没建成功就让 ssh 退出，免得看着连上了、实际用不了</dd>
+                  <dt>ServerAliveInterval / CountMax</dt><dd>每 30 秒发一次心跳，连续 3 次没回应就认定断线</dd>
                 </dl>
               </div>
               <div class="cmd-block">
@@ -219,13 +226,13 @@
                 </div>
                 <pre class="cmd-text" id="cg-autossh"></pre>
                 <dl class="cmd-notes">
-                  <dt>autossh</dt><dd>断线自动重连的 ssh 包装器（需 apt/yum install autossh）</dd>
-                  <dt>-M 0</dt><dd>关闭自带监视端口，改用 ServerAlive 探测（推荐做法）</dd>
-                  <dt>AUTOSSH_GATETIME=0</dt><dd>启动时即使连不上也不放弃，适合开机自启</dd>
+                  <dt>autossh</dt><dd>ssh 的自动重连版，断了会自己接上（服务器上需先安装）</dd>
+                  <dt>-M 0</dt><dd>关掉 autossh 自带的探测，改用上面的心跳（推荐）</dd>
+                  <dt>AUTOSSH_GATETIME=0</dt><dd>第一次就连不上也不退出，接着重试，适合开机自启</dd>
                 </dl>
               </div>
               <div class="hint tight">
-                密码认证首次连接会交互输入；常驻建议先 <b>ssh-copy-id</b> 配好密钥再跑。
+                第一次连接会提示输密码；想让它长期挂着，先用 <b>ssh-copy-id</b> 配好免密登录更省心。
               </div>
             </div>
           </section>
@@ -266,6 +273,33 @@
                 <p>在你电脑上开一个 SOCKS5 代理，任意流量<b>经服务器代连</b> —— 浏览器挂上就能访问服务器内网。</p>
               </div>
               <div class="hint tight">「命令生成」页是第四种场景：服务器 ↔ 服务器，命令拷到服务器上执行，不经过本机。</div>
+            </div>
+
+            <div class="card">
+              <h3>什么情况用哪种？</h3>
+              <p class="card-sub">三个常见例子</p>
+
+              <div class="case">
+                <div class="case-body">
+                  <strong>服务器上不了外网，你的电脑可以</strong>
+                  <p>服务器要装软件、拉代码，却只有你的电脑能上外网。把你电脑上的代理「借」给服务器用——本软件的「VPN 共享」预设干的就是这件事。</p>
+                </div>
+                <span class="ktag">反向 -R</span>
+              </div>
+              <div class="case">
+                <div class="case-body">
+                  <strong>人在外面，想访问公司内网的服务</strong>
+                  <p>数据库、管理后台只对公司内网开放，你的电脑连不进去。在本机开个小端口，流量经服务器带你进内网。</p>
+                </div>
+                <span class="ktag">本地 -L</span>
+              </div>
+              <div class="case">
+                <div class="case-body">
+                  <strong>内网服务一大把，一个个开隧道太麻烦</strong>
+                  <p>一条命令把服务器变成你电脑的出口：浏览器或终端挂上 SOCKS5 代理，就像人坐在服务器跟前。</p>
+                </div>
+                <span class="ktag">动态 -D</span>
+              </div>
             </div>
 
             <div class="card">

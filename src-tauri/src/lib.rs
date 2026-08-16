@@ -9,6 +9,8 @@
 //! - 预设向导: `presets_list/tunnel_from_preset`
 //! - 我的场景 (用户保存的模板): `scenarios_list/scenario_save/scenario_delete/
 //!   tunnel_from_scenario`
+//! - 命令生成页落盘 (我的命令 + 最近输入, 加密文件): `cmdgen_list/cmdgen_save/
+//!   cmdgen_delete/cmdgen_set_last`
 //! - 档案: `list_profiles/save_profile/delete_profile` + 分层默认值
 //!   `profile_defaults_get/profile_defaults_save`
 //! - 场景动作: `verify_remote_tunnel/deploy_wrapper` (vpn_share 预设附带)
@@ -23,6 +25,7 @@ use std::sync::Arc;
 use proxy_tool_core::engine::pool::{resolve_max_sessions, resolve_share};
 use proxy_tool_core::engine::{Registry, SshCreds};
 use proxy_tool_core::model::{TunnelKind, TunnelSpec, TunnelState};
+use proxy_tool_core::cmd_recipes::{self, CmdParams, CmdRecipe, CmdRecipeStore};
 use proxy_tool_core::scenarios::Scenario;
 use proxy_tool_core::{presets, probe, profiles, ssh, store, TunnelEvents};
 use serde::Serialize;
@@ -39,6 +42,8 @@ pub struct AppState {
     pub profile_store: Mutex<store::ProfileStore>,
     /// 我的场景 (用户保存的隧道模板; scenarios.json)
     pub scenario_store: Mutex<store::ScenarioStore>,
+    /// 命令生成页用户数据 (我的命令 + 最近输入; cmd_recipes.enc 加密落盘)
+    pub cmd_store: Mutex<CmdRecipeStore>,
 }
 
 /// 隧道状态事件负载: { id, kind, state, message? }
@@ -380,6 +385,62 @@ async fn scenario_delete(
     store_guard.scenarios.retain(|s| s.id != id);
     store::save_scenarios(&data_dir(&app)?, &store_guard)?;
     Ok(store_guard.scenarios.clone())
+}
+
+// ---------- 命令生成页落盘 (我的命令 + 最近输入; AES-GCM 加密, 无凭据) ----------
+
+/// 命令: 我的命令 + 最近输入 (页面初始化恢复用)
+#[tauri::command]
+async fn cmdgen_list(state: tauri::State<'_, AppState>) -> Result<CmdRecipeStore, String> {
+    Ok(state.cmd_store.lock().await.clone())
+}
+
+/// 命令: 保存/更新一条我的命令 (id 相同覆盖, 空 id 新建), 返回最新列表
+#[tauri::command]
+async fn cmdgen_save(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+    mut recipe: CmdRecipe,
+) -> Result<Vec<CmdRecipe>, String> {
+    if recipe.name.trim().is_empty() {
+        return Err("命令名称不能为空".into());
+    }
+    if recipe.id.trim().is_empty() {
+        recipe.id = TunnelSpec::new_id();
+    }
+    let mut store_guard = state.cmd_store.lock().await;
+    if let Some(r) = store_guard.recipes.iter_mut().find(|r| r.id == recipe.id) {
+        *r = recipe;
+    } else {
+        store_guard.recipes.push(recipe);
+    }
+    cmd_recipes::save_cmd_store(&data_dir(&app)?, &store_guard)?;
+    Ok(store_guard.recipes.clone())
+}
+
+/// 命令: 删除一条我的命令, 返回最新列表
+#[tauri::command]
+async fn cmdgen_delete(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+    id: String,
+) -> Result<Vec<CmdRecipe>, String> {
+    let mut store_guard = state.cmd_store.lock().await;
+    store_guard.recipes.retain(|r| r.id != id);
+    cmd_recipes::save_cmd_store(&data_dir(&app)?, &store_guard)?;
+    Ok(store_guard.recipes.clone())
+}
+
+/// 命令: 记住最近一次输入 (前端防抖调用; 打开页面时恢复)
+#[tauri::command]
+async fn cmdgen_set_last(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+    params: CmdParams,
+) -> Result<(), String> {
+    let mut store_guard = state.cmd_store.lock().await;
+    store_guard.last = Some(params);
+    cmd_recipes::save_cmd_store(&data_dir(&app)?, &store_guard)
 }
 
 /// 命令: 按我的场景生成隧道模板 (克隆 kind/backend; 重连策略继承档案层默认值)
@@ -729,6 +790,7 @@ pub fn run() {
                 registry,
                 profile_store: Mutex::new(profile_store),
                 scenario_store: Mutex::new(store::load_scenarios(&dir)),
+                cmd_store: Mutex::new(cmd_recipes::load_cmd_store(&dir)),
             });
 
             setup_tray(handle)?;
@@ -789,6 +851,10 @@ pub fn run() {
             scenario_save,
             scenario_delete,
             tunnel_from_scenario,
+            cmdgen_list,
+            cmdgen_save,
+            cmdgen_delete,
+            cmdgen_set_last,
             list_profiles,
             save_profile,
             delete_profile,

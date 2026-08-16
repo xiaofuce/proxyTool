@@ -15,9 +15,11 @@
 //! - `probe`: 本机代理端口探测 (VPN 无关化)
 //! - `profiles`: 服务器档案 (密码永不落盘)
 //! - `store`: 档案 + 隧道列表持久化 (JSON, 路径可注入, v1→v2 迁移)
+//! - `cmd_recipes`: 命令生成页用户数据 (我的命令 + 最近输入, AES-GCM 加密落盘)
 //! - `creds`: 测试/调试凭据 (环境变量或 gitignored 本地文件)
 
 pub mod backend;
+pub mod cmd_recipes;
 pub mod creds;
 pub mod direct;
 pub mod engine;

@@ -1046,12 +1046,12 @@ function cmdGenBuild(): { ssh: string; autossh: string; hint: string } {
   const autossh = `AUTOSSH_GATETIME=0 autossh -M 0 -N ${fwd} ${opts} ${dest}`;
 
   let hint: string;
-  if (kind === "local") hint = `在 A 上监听 ${bind ? "0.0.0.0" : "127.0.0.1"}:${listen}，流量经 B 连到 ${thost}:${tport}（目标地址相对 B 解析）`;
-  else if (kind === "reverse") hint = `在 B 上监听 ${bind ? "0.0.0.0" : "127.0.0.1"}:${listen}，流量回到 A 侧的 ${thost}:${tport}（目标地址相对 A 解析）`;
-  else hint = `在 A 上监听 ${bind ? "0.0.0.0" : "127.0.0.1"}:${listen} 作为 SOCKS5 入口，流量经 B 代连任意目标`;
-  if (kind === "reverse" && bind) hint += "。注意: B 的 sshd 需 GatewayPorts yes（或 clientspecified），0.0.0.0 监听才对 B 之外的机器开放";
+  if (kind === "local") hint = `这条命令在 A 上运行：A 开出端口 ${bind ? "0.0.0.0" : "127.0.0.1"}:${listen}，连它的流量经 SSH 送到 B，再由 B 去连 ${thost}:${tport}`;
+  else if (kind === "reverse") hint = `这条命令在 A 上运行，但端口开在 B 上（${bind ? "0.0.0.0" : "127.0.0.1"}:${listen}）；B 上这个端口的流量经 SSH 回到 A，由 A 去连 ${thost}:${tport}`;
+  else hint = `这条命令在 A 上运行：A 会多出一个 SOCKS5 代理（127.0.0.1:${listen}），程序把代理指向它，流量就从 B 出去了`;
+  if (kind === "reverse" && bind) hint += "。注意：想让 B 同一网络的其他机器也能连，B 的 sshd 要设 GatewayPorts yes，默认只有 B 自己连得上";
   const sel = profiles.find((p) => p.id === el<HTMLSelectElement>("cg-profile").value);
-  if (sel?.identityFile) hint += "。该档案走密钥认证 —— 命令在服务器上执行时需自备私钥（可加 -i ~/.ssh/id_ed25519）";
+  if (sel?.identityFile) hint += "。这个档案平时用密钥登录——但命令要在 A 上跑，A 上也得有私钥（可加参数 -i ~/.ssh/id_ed25519）";
   return { ssh, autossh, hint };
 }
 
@@ -1069,9 +1069,10 @@ function cmdGenRegen() {
     thost: el<HTMLInputElement>("cg-thost").value.trim() || "127.0.0.1",
     tport: el<HTMLInputElement>("cg-tport").value.trim() || "8080",
   });
+  scheduleCmdLastSave();
 }
 
-/** 流程图示: 三节点 (在哪监听 → SSH → 流量去向), 按形态换序换文案 */
+/** 流程图示: 三节点 (在哪开端口 → SSH → 流量最后到哪), 按形态换序换文案 */
 function renderCmdFlow(
   kind: "local" | "reverse" | "dynamic",
   v: { host: string; listen: string; thost: string; tport: string },
@@ -1080,26 +1081,156 @@ function renderCmdFlow(
     `<div class="flow-node"><span class="flow-ic">${icon(ic, 18)}</span><div class="flow-tx"><strong>${escapeHtml(title)}</strong><span>${escapeHtml(sub)}</span></div></div>`;
   const arrow = (lab: string) =>
     `<div class="flow-arrow">${icon("arrow-right", 14)}<span>${escapeHtml(lab)}</span></div>`;
-  const bTxt = escapeHtml(v.host || "B");
+  const bTxt = escapeHtml(v.host || "B 的地址");
   const target = `${v.thost}:${v.tport}`;
   let html: string;
   if (kind === "local") {
     html =
-      node("monitor", "A · 命令所在机", `监听 :${v.listen}`) + arrow("SSH") +
-      node("server", "B · 目标服务器", bTxt) + arrow("代连") +
-      node("globe", target, "相对 B 解析");
+      node("monitor", "A · 跑命令的机器", `A 上开端口 :${v.listen}`) + arrow("SSH") +
+      node("server", "B · 目标服务器", bTxt) + arrow("B 帮忙连") +
+      node("globe", target, "这个地址从 B 那边连");
   } else if (kind === "reverse") {
     html =
-      node("server", "B · 目标服务器", `${bTxt} · 监听 :${v.listen}`) + arrow("SSH") +
-      node("monitor", "A · 命令所在机", "你在这台机器执行命令") + arrow("代连") +
-      node("globe", target, "相对 A 解析");
+      node("server", "B · 目标服务器", `${bTxt} · 开端口 :${v.listen}`) + arrow("SSH") +
+      node("monitor", "A · 跑命令的机器", "命令在这台机器上运行") + arrow("A 帮忙连") +
+      node("globe", target, "这个地址从 A 那边连");
   } else {
     html =
-      node("monitor", "A · 命令所在机", `SOCKS5 :${v.listen}`) + arrow("SSH") +
-      node("server", "B · 目标服务器", bTxt) + arrow("代连") +
-      node("globe", "任意目标", "经 B 代连");
+      node("monitor", "A · 跑命令的机器", `SOCKS5 代理 :${v.listen}`) + arrow("SSH") +
+      node("server", "B · 目标服务器", bTxt) + arrow("B 帮忙连") +
+      node("globe", "任意地址", "从 B 那边连出去");
   }
   el<HTMLElement>("cg-flow").innerHTML = html;
+}
+
+// ---------- 命令生成页落盘 (我的命令 + 最近输入; 后端 AES-GCM 加密文件) ----------
+
+type CmdParamsT = {
+  kind: string; host: string; port: number; user: string;
+  listen: number; targetHost: string; targetPort: number; bindAll: boolean;
+};
+type CmdRecipeT = { id: string; name: string } & CmdParamsT;
+
+let cmdRecipes: CmdRecipeT[] = [];
+/** 最近输入落盘就绪标志 (初始恢复完成前不回写, 避免载入即覆盖) */
+let cmdLastReady = false;
+let cmdLastTimer: number | undefined;
+
+function collectCmdParams(): CmdParamsT {
+  return {
+    kind: document.querySelector<HTMLInputElement>("input[name=cg-kind]:checked")?.value ?? "local",
+    host: el<HTMLInputElement>("cg-host").value.trim(),
+    port: Number(el<HTMLInputElement>("cg-port").value.trim() || "22") || 22,
+    user: el<HTMLInputElement>("cg-user").value.trim(),
+    listen: Number(el<HTMLInputElement>("cg-listen").value.trim() || "1080") || 1080,
+    targetHost: el<HTMLInputElement>("cg-thost").value.trim() || "127.0.0.1",
+    targetPort: Number(el<HTMLInputElement>("cg-tport").value.trim() || "8080") || 8080,
+    bindAll: el<HTMLInputElement>("cg-bind").checked,
+  };
+}
+
+/** 参数回填表单 (载入我的命令 / 恢复最近输入) */
+function applyCmdParams(p: CmdParamsT) {
+  const radio =
+    document.querySelector<HTMLInputElement>(`input[name=cg-kind][value="${p.kind}"]`) ??
+    document.querySelector<HTMLInputElement>('input[name=cg-kind][value="local"]');
+  if (radio) radio.checked = true;
+  el<HTMLInputElement>("cg-host").value = p.host;
+  el<HTMLInputElement>("cg-port").value = String(p.port);
+  el<HTMLInputElement>("cg-user").value = p.user;
+  el<HTMLInputElement>("cg-listen").value = String(p.listen);
+  el<HTMLInputElement>("cg-thost").value = p.targetHost;
+  el<HTMLInputElement>("cg-tport").value = String(p.targetPort);
+  el<HTMLInputElement>("cg-bind").checked = !!p.bindAll;
+  // 档案下拉: 同 host+port+user 的档案选中, 否则手动输入
+  const match = profiles.find((x) => x.host === p.host && x.port === p.port && x.username === p.user);
+  el<HTMLSelectElement>("cg-profile").value = match?.id ?? "";
+}
+
+function refreshCmdRecipes() {
+  const sel = el<HTMLSelectElement>("cg-recipes");
+  const prev = sel.value;
+  sel.innerHTML = "";
+  const ph = document.createElement("option");
+  ph.value = "";
+  ph.textContent = cmdRecipes.length ? "载入已保存的命令…" : "还没有保存的命令";
+  sel.append(ph);
+  for (const r of cmdRecipes) {
+    const o = document.createElement("option");
+    o.value = r.id;
+    o.textContent = r.name;
+    sel.append(o);
+  }
+  if ([...sel.options].some((o) => o.value === prev)) sel.value = prev;
+}
+
+function suggestCmdName(p: CmdParamsT): string {
+  return p.kind === "dynamic"
+    ? `${p.host} 的代理 :${p.listen}`
+    : `${p.host} → ${p.targetHost}:${p.targetPort}`;
+}
+
+/** 存为命令 (选中已有条目 = 更新它; dialog 输入名) */
+async function saveCmdRecipe() {
+  const params = collectCmdParams();
+  const selId = el<HTMLSelectElement>("cg-recipes").value;
+  const cur = cmdRecipes.find((r) => r.id === selId);
+  const name = await dialog({
+    title: "保存命令",
+    body: "给这组参数起个名字，下次直接从「我的命令」里载入。",
+    input: { value: cur?.name ?? suggestCmdName(params) },
+  });
+  if (typeof name !== "string") return;
+  if (!name.trim()) {
+    toast("命令名称不能为空", "error");
+    return;
+  }
+  try {
+    const list = await invoke<CmdRecipeT[]>("cmdgen_save", {
+      recipe: { id: cur?.id ?? "", name: name.trim(), ...params },
+    });
+    cmdRecipes = list;
+    refreshCmdRecipes();
+    el<HTMLSelectElement>("cg-recipes").value = cur?.id ?? list[list.length - 1]?.id ?? "";
+    toast("命令已保存", "success");
+  } catch (err) {
+    toast(String(err), "error");
+  }
+}
+
+async function deleteCmdRecipe() {
+  const id = el<HTMLSelectElement>("cg-recipes").value;
+  if (!id) {
+    toast("先在下拉框里选中一条命令", "info");
+    return;
+  }
+  const r = cmdRecipes.find((x) => x.id === id);
+  if (
+    !(await dialog({
+      title: "删除命令",
+      body: `确定删除「${r?.name ?? ""}」吗？`,
+      danger: true,
+      confirmText: "删除",
+    }))
+  ) {
+    return;
+  }
+  try {
+    cmdRecipes = await invoke<CmdRecipeT[]>("cmdgen_delete", { id });
+    refreshCmdRecipes();
+    toast("已删除", "success");
+  } catch (err) {
+    toast(String(err), "error");
+  }
+}
+
+/** 最近输入防抖落盘 (1.2s 静默后写一次; 失败静默——只影响下次恢复) */
+function scheduleCmdLastSave() {
+  if (!cmdLastReady) return;
+  window.clearTimeout(cmdLastTimer);
+  cmdLastTimer = window.setTimeout(() => {
+    void invoke("cmdgen_set_last", { params: collectCmdParams() }).catch(() => {});
+  }, 1200);
 }
 
 /** 档案下拉选项刷新 (renderHosts 后调用 —— profiles 变化的汇聚点) */
@@ -1160,6 +1291,29 @@ function initCmdGen() {
       }
     });
   }
+  // 我的命令: 载入已存条目 + 恢复最近输入 (后端加密落盘; 失败不阻断页面)
+  el<HTMLSelectElement>("cg-recipes").addEventListener("change", () => {
+    const r = cmdRecipes.find((x) => x.id === el<HTMLSelectElement>("cg-recipes").value);
+    if (r) {
+      applyCmdParams(r);
+      cmdGenRegen();
+    }
+  });
+  el<HTMLButtonElement>("cg-save").addEventListener("click", () => void saveCmdRecipe());
+  el<HTMLButtonElement>("cg-del").addEventListener("click", () => void deleteCmdRecipe());
+  void (async () => {
+    try {
+      const st = await invoke<{ recipes?: CmdRecipeT[]; last?: CmdParamsT | null }>("cmdgen_list");
+      cmdRecipes = st.recipes ?? [];
+      if (st.last) applyCmdParams(st.last);
+    } catch {
+      /* 落盘不可用 → 空列表照常用 */
+    }
+    refreshCmdRecipes();
+    cmdGenRegen();
+    cmdLastReady = true;
+  })();
+
   cmdGenRefreshProfiles();
   cmdGenRegen();
 }

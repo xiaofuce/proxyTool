@@ -897,7 +897,7 @@ button.danger:hover:not(:disabled) {
 }
 
 .hb-pill {
-  transition: opacity 0.12s ease;
+  transition: opacity 0.12s ease, visibility 0.12s ease;
 }
 
 .hb-acts {
@@ -917,6 +917,8 @@ button.danger:hover:not(:disabled) {
 .host-block:hover .hb-pill,
 .host-block:focus-within .hb-pill {
   opacity: 0;
+  /* visibility 交接命中 —— 只淡出的话 inline 的 pill 仍 paint 在按钮之上, 透明挡点击 */
+  visibility: hidden;
 }
 
 /* 块级小图标钮 (编辑/删除): 幽灵态, 删除钮 hover 红 */
@@ -1079,6 +1081,39 @@ button.danger:hover:not(:disabled) {
 }
 
 /* ===================== 命令生成页 ===================== */
+/* 我的命令行: 命名保存的参数组 (后端加密落盘), 与下方表单虚线分隔 */
+.cg-saved {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 16px;
+  padding-bottom: 14px;
+  border-bottom: 1px dashed var(--border);
+}
+
+.cg-saved-label {
+  font-size: var(--fs-sm);
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.cg-saved select {
+  flex: 1;
+  min-width: 0;
+}
+
+.cg-saved button {
+  flex-shrink: 0;
+}
+
+/* 选参数卡: 参数块之间的行距 (块级元素默认贴紧, 加 16px 呼吸感) */
+.page[data-page="tools"] .card > label:not(.check-label),
+.page[data-page="tools"] .card > .form-grid,
+.page[data-page="tools"] .card > .field-title,
+.page[data-page="tools"] .card > .seg {
+  margin-bottom: 16px;
+}
+
 .cg-target {
   display: grid;
   grid-template-columns: 1fr 1fr;
@@ -1310,6 +1345,41 @@ button.danger:hover:not(:disabled) {
   font-size: var(--fs-sm);
   color: var(--text-2);
   line-height: 1.65;
+}
+
+/* 案例卡: 情况描述 + 右侧形态标签 (什么时候用哪种) */
+.case {
+  display: flex;
+  align-items: flex-start;
+  gap: 14px;
+  padding: 12px 0 10px;
+}
+
+.case + .case {
+  border-top: 1px solid var(--border);
+}
+
+.case-body {
+  flex: 1;
+  min-width: 0;
+}
+
+.case-body strong {
+  display: block;
+  font-size: var(--fs-sm);
+  margin-bottom: 3px;
+}
+
+.case-body p {
+  margin: 0;
+  font-size: var(--fs-sm);
+  color: var(--text-2);
+  line-height: 1.65;
+}
+
+.case > .ktag {
+  margin-top: 2px;
+  flex-shrink: 0;
 }
 
 /* FAQ 折叠项 */
