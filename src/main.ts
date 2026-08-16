@@ -945,6 +945,8 @@ function renderHosts() {
     grid.append(block);
   }
 
+  cmdGenRefreshProfiles();
+
   // + 新建块
   const newBlock = document.createElement("button");
   newBlock.type = "button";
@@ -1017,6 +1019,115 @@ function setDetailView(view: DetailView) {
   if (view === "detail") renderServerDetail();
 }
 
+// ---------- 工具: 隧道命令生成器 (命令在服务器 A 上执行, 经 SSH 到目标 B) ----------
+
+/** 按当前表单状态生成 ssh / autossh 命令 (纯字符串, 不碰引擎) */
+function cmdGenBuild(): { ssh: string; autossh: string; hint: string } {
+  const host = el<HTMLInputElement>("cg-host").value.trim();
+  const port = el<HTMLInputElement>("cg-port").value.trim() || "22";
+  const user = el<HTMLInputElement>("cg-user").value.trim();
+  const listen = el<HTMLInputElement>("cg-listen").value.trim() || "1080";
+  const thost = el<HTMLInputElement>("cg-thost").value.trim() || "127.0.0.1";
+  const tport = el<HTMLInputElement>("cg-tport").value.trim() || "8080";
+  const bind = el<HTMLInputElement>("cg-bind").checked;
+  const kind = (document.querySelector<HTMLInputElement>("input[name=cg-kind]:checked")?.value ?? "local") as
+    | "local" | "reverse" | "dynamic";
+
+  const bindPrefix = bind ? "0.0.0.0:" : "";
+  const fwd =
+    kind === "dynamic"
+      ? `-D ${bindPrefix}${listen}`
+      : kind === "local"
+        ? `-L ${bindPrefix}${listen}:${thost}:${tport}`
+        : `-R ${bindPrefix}${listen}:${thost}:${tport}`;
+  const opts = "-o ExitOnForwardFailure=yes -o ServerAliveInterval=30 -o ServerAliveCountMax=3";
+  const dest = `${user ? `${user}@` : ""}${host} -p ${port}`;
+  const ssh = `ssh -N ${fwd} ${opts} ${dest}`;
+  const autossh = `AUTOSSH_GATETIME=0 autossh -M 0 -N ${fwd} ${opts} ${dest}`;
+
+  let hint: string;
+  if (kind === "local") hint = `在 A 上监听 ${bind ? "0.0.0.0" : "127.0.0.1"}:${listen}，流量经 B 连到 ${thost}:${tport}（目标地址相对 B 解析）`;
+  else if (kind === "reverse") hint = `在 B 上监听 ${bind ? "0.0.0.0" : "127.0.0.1"}:${listen}，流量回到 A 侧的 ${thost}:${tport}（目标地址相对 A 解析）`;
+  else hint = `在 A 上监听 ${bind ? "0.0.0.0" : "127.0.0.1"}:${listen} 作为 SOCKS5 入口，流量经 B 代连任意目标`;
+  if (kind === "reverse" && bind) hint += "。注意: B 的 sshd 需 GatewayPorts yes（或 clientspecified），0.0.0.0 监听才对 B 之外的机器开放";
+  const sel = profiles.find((p) => p.id === el<HTMLSelectElement>("cg-profile").value);
+  if (sel?.identityFile) hint += "。该档案走密钥认证 —— 命令在服务器上执行时需自备私钥（可加 -i ~/.ssh/id_ed25519）";
+  return { ssh, autossh, hint };
+}
+
+function cmdGenRegen() {
+  const { ssh, autossh, hint } = cmdGenBuild();
+  el<HTMLPreElement>("cg-ssh").textContent = ssh;
+  el<HTMLPreElement>("cg-autossh").textContent = autossh;
+  el<HTMLDivElement>("cg-hint").textContent = hint;
+  const kind = document.querySelector<HTMLInputElement>("input[name=cg-kind]:checked")?.value;
+  el<HTMLElement>("cg-target-wrap").classList.toggle("hidden", kind === "dynamic");
+  // 动态形态下目标地址标签语义不同, 恢复可见时标签正确 (local 固定文案)
+}
+
+/** 档案下拉选项刷新 (renderHosts 后调用 —— profiles 变化的汇聚点) */
+function cmdGenRefreshProfiles() {
+  const sel = el<HTMLSelectElement>("cg-profile");
+  const prev = sel.value;
+  sel.innerHTML = "";
+  const manual = document.createElement("option");
+  manual.value = "";
+  manual.textContent = "手动输入";
+  sel.append(manual);
+  for (const p of profiles) {
+    const o = document.createElement("option");
+    o.value = p.id;
+    o.textContent = `${p.name} (${p.host})`;
+    sel.append(o);
+  }
+  if ([...sel.options].some((o) => o.value === prev)) sel.value = prev;
+}
+
+/** 服务器详情「生成命令」入口: 跳工具页并预填该服务器为目标 */
+function jumpToCmdGen(p: Profile) {
+  showPage("tools");
+  cmdGenRefreshProfiles();
+  el<HTMLSelectElement>("cg-profile").value = p.id;
+  el<HTMLInputElement>("cg-host").value = p.host;
+  el<HTMLInputElement>("cg-port").value = String(p.port);
+  el<HTMLInputElement>("cg-user").value = p.username;
+  cmdGenRegen();
+}
+
+function initCmdGen() {
+  el<HTMLSelectElement>("cg-profile").addEventListener("change", () => {
+    const p = profiles.find((x) => x.id === el<HTMLSelectElement>("cg-profile").value);
+    if (p) {
+      el<HTMLInputElement>("cg-host").value = p.host;
+      el<HTMLInputElement>("cg-port").value = String(p.port);
+      el<HTMLInputElement>("cg-user").value = p.username;
+    }
+    cmdGenRegen();
+  });
+  for (const id of ["cg-host", "cg-port", "cg-user", "cg-listen", "cg-thost", "cg-tport"]) {
+    el<HTMLInputElement>(id).addEventListener("input", cmdGenRegen);
+  }
+  el<HTMLInputElement>("cg-bind").addEventListener("change", cmdGenRegen);
+  for (const r of document.querySelectorAll<HTMLInputElement>("input[name=cg-kind]")) {
+    r.addEventListener("change", cmdGenRegen);
+  }
+  for (const b of document.querySelectorAll<HTMLButtonElement>(".cmd-copy")) {
+    b.innerHTML = `${icon("copy", 12)}<span class="btn-label">复制</span>`;
+    b.addEventListener("click", async () => {
+      const { ssh, autossh } = cmdGenBuild();
+      try {
+        await navigator.clipboard.writeText(b.dataset.cmd === "autossh" ? autossh : ssh);
+        toast("命令已复制", "success");
+      } catch {
+        toast("复制失败", "error");
+      }
+    });
+  }
+  cmdGenRefreshProfiles();
+  cmdGenRegen();
+}
+
+
 // ---------- 服务器详情 ----------
 /** 服务器删除 (块上删除图标钮): 确认对话框 → delete_profile → 回空态 */
 async function deleteProfileFlow(p: Profile) {
@@ -1057,7 +1168,13 @@ function renderServerDetail(showPwBar = false) {
   title.innerHTML =
     `<strong>${escapeHtml(p.name)}</strong>` +
     `<span>${escapeHtml(p.host)}:${p.port} · ${escapeHtml(p.username)} · ${p.identityFile ? icon("key", 12) + " 密钥认证" : "密码认证"}</span>`;
-  head.append(title);
+  const genBtn = document.createElement("button");
+  genBtn.type = "button";
+  genBtn.className = "pd-gen";
+  genBtn.title = "为此服务器生成隧道命令 (工具页)";
+  genBtn.innerHTML = `${icon("terminal", 14)}<span class="btn-label">生成命令</span>`;
+  genBtn.addEventListener("click", () => jumpToCmdGen(p));
+  head.append(title, genBtn);
 
   // 一键启动密码条 (密码档案首次 ▶ 时出现)
   const pwbar = el<HTMLDivElement>("pd-pwbar");
@@ -1732,6 +1849,7 @@ async function loadAutostart() {
 function applyStaticIcons() {
   const NAV_ICONS: Record<string, IconName> = {
     servers: "server",
+    tools: "terminal",
     settings: "settings",
   };
   for (const b of document.querySelectorAll<HTMLElement>(".nav-item")) {
@@ -1753,6 +1871,7 @@ function applyStaticIcons() {
 
 applyStaticIcons();
 initAppearance();
+initCmdGen();
 (async () => {
   profiles = await invoke<Profile[]>("list_profiles");
   tunnels = await invoke<TunnelDto[]>("tunnels_list");

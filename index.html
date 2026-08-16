@@ -34,6 +34,9 @@
           <button class="nav-item active" data-page="servers">
             <span class="nav-icon"></span><span class="nav-label">服务器</span>
           </button>
+          <button class="nav-item" data-page="tools">
+            <span class="nav-icon"></span><span class="nav-label">工具</span>
+          </button>
           <button class="nav-item" data-page="settings">
             <span class="nav-icon"></span><span class="nav-label">设置</span>
           </button>
@@ -126,6 +129,86 @@
                 启动后隐藏到托盘（点击托盘图标显示主窗口，关闭按钮也是收进托盘）。
                 需同时勾选隧道行的「自启」，且档案为<b>未加密私钥</b>认证，隧道才会免交互自动连接；
                 密码认证的隧道需打开窗口手动启动。
+              </div>
+            </div>
+          </section>
+
+          <!-- 工具: 隧道命令生成器 (服务器到服务器, 命令在服务器上执行) -->
+          <section class="page" data-page="tools">
+            <header class="page-head">
+              <h2>工具</h2>
+              <p>生成在服务器上执行的隧道命令 —— 服务器 ↔ 服务器，不经过本机</p>
+            </header>
+
+            <div class="card">
+              <h3>隧道命令生成器 <span class="card-sub">在服务器 A 上执行，经 SSH 连到目标服务器 B</span></h3>
+
+              <label>
+                <span>SSH 目标 (B)</span>
+                <select id="cg-profile"></select>
+              </label>
+              <div class="form-grid">
+                <label>
+                  <span>地址</span>
+                  <input id="cg-host" type="text" placeholder="10.0.0.8" />
+                </label>
+                <label>
+                  <span>端口</span>
+                  <input id="cg-port" type="number" value="22" min="1" max="65535" />
+                </label>
+                <label>
+                  <span>用户名</span>
+                  <input id="cg-user" type="text" placeholder="root" />
+                </label>
+              </div>
+
+              <div class="field-title">隧道形态</div>
+              <div class="seg" id="cg-kind">
+                <label class="seg-item"><input type="radio" name="cg-kind" value="local" checked /><span>本地 -L · 访问 B 侧服务</span></label>
+                <label class="seg-item"><input type="radio" name="cg-kind" value="reverse" /><span>反向 -R · 暴露 A 侧服务</span></label>
+                <label class="seg-item"><input type="radio" name="cg-kind" value="dynamic" /><span>动态 -D · SOCKS5</span></label>
+              </div>
+
+              <div class="form-grid">
+                <label>
+                  <span>监听端口</span>
+                  <input id="cg-listen" type="number" value="1080" min="1" max="65535" />
+                </label>
+                <span id="cg-target-wrap" class="cg-target">
+                  <label>
+                    <span>目标地址 (相对 B 解析)</span>
+                    <input id="cg-thost" type="text" value="127.0.0.1" />
+                  </label>
+                  <label>
+                    <span>目标端口</span>
+                    <input id="cg-tport" type="number" value="8080" min="1" max="65535" />
+                  </label>
+                </span>
+              </div>
+              <label class="check-label">
+                <input type="checkbox" id="cg-bind" />
+                <span>监听 0.0.0.0（同网段其他机器可连）</span>
+              </label>
+
+              <div class="hint tight" id="cg-hint"></div>
+
+              <div class="cmd-block">
+                <div class="cmd-head">
+                  <span class="cmd-title">ssh · 临时（前台运行，断开即停）</span>
+                  <button type="button" class="cmd-copy" data-cmd="ssh">复制</button>
+                </div>
+                <pre class="cmd-text" id="cg-ssh"></pre>
+              </div>
+              <div class="cmd-block">
+                <div class="cmd-head">
+                  <span class="cmd-title">autossh · 常驻（断线自动重连）</span>
+                  <button type="button" class="cmd-copy" data-cmd="autossh">复制</button>
+                </div>
+                <pre class="cmd-text" id="cg-autossh"></pre>
+              </div>
+              <div class="hint tight">
+                密码认证首次连接会交互输入；常驻建议先 <b>ssh-copy-id</b> 配好密钥。
+                autossh 需服务器已安装（apt/yum install autossh）。
               </div>
             </div>
           </section>

@@ -1037,6 +1037,12 @@ button.danger:hover:not(:disabled) {
 }
 
 /* 服务器详情头 */
+#pd-head {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+}
+
 .pd-title {
   display: flex;
   flex-direction: column;
@@ -1055,6 +1061,72 @@ button.danger:hover:not(:disabled) {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* 详情头「生成命令」入口 (编辑/删除已移至服务器块) */
+.pd-gen {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: var(--fs-sm);
+}
+
+/* ===================== 工具页: 命令生成器 ===================== */
+.cg-target {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+
+#cg-target-wrap.hidden {
+  display: none;
+}
+
+.cmd-block {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--inset);
+  overflow: hidden;
+  margin-top: 12px;
+}
+
+.cmd-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 5px 8px 5px 12px;
+  border-bottom: 1px solid var(--border);
+}
+
+.cmd-title {
+  font-size: var(--fs-sm);
+  color: var(--text-2);
+}
+
+.cmd-copy {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: var(--fs-xs);
+  padding: 3px 9px;
+  color: var(--muted);
+}
+
+.cmd-copy:hover {
+  color: var(--text);
+  background: var(--surface-2);
+}
+
+.cmd-text {
+  margin: 0;
+  padding: 10px 12px;
+  font-family: "Cascadia Mono", Consolas, monospace;
+  font-size: var(--fs-sm);
+  color: var(--text);
+  white-space: pre-wrap;
+  word-break: break-all;
 }
 
 /* 分段选择 (形态/落地后端) */
