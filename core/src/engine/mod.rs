@@ -5,6 +5,7 @@
 //! 在 start 时注入)。每条运行中的隧道一个状态机任务 (engine/tunnel.rs,
 //! actor 式: 停止 = 停止标志 + 关闭会话槽, 任务自行收尾退出)。
 
+pub mod pool;
 mod tunnel;
 
 use std::collections::HashMap;
@@ -20,6 +21,8 @@ use crate::model::{TunnelKind, TunnelSpec, TunnelState};
 use crate::store;
 use crate::TunnelEvents;
 
+pub use pool::{ConnPool, ConnStats, Lease};
+
 /// 建连凭据 (每次启动时由调用方注入; 密码/口令仅存内存)
 #[derive(Debug, Clone)]
 pub struct SshCreds {
@@ -27,6 +30,10 @@ pub struct SshCreds {
     pub port: u16,
     pub username: String,
     pub auth: crate::ssh::AuthMethod,
+    /// 同档案共享连接 (pool::resolve_share 解析产物)
+    pub share: bool,
+    /// MaxSessions 预算 (通道计数告警阈值; C4 起参与准入)
+    pub max_sessions: u32,
 }
 
 /// 会话槽: 任务与注册表共享同一底层槽 (Arc 包裹, 浅克隆即共享)。
@@ -53,8 +60,10 @@ impl SessionSlot {
         }
     }
 
-    /// 硬断开当前会话 (无会话则无操作)
-    async fn close_current(&self) {
+    /// 硬断开当前会话 (无会话则无操作)。
+    /// `force`: 模拟网络掉线 —— 共享连接也整连断开 (成员各自重连);
+    /// false = 用户停止语义, 共享连接只停本隧道。
+    async fn close_current(&self, force: bool) {
         match self {
             SessionSlot::Reverse(slot) => {
                 if let Some(session) = slot.lock().await.take() {
@@ -63,7 +72,11 @@ impl SessionSlot {
             }
             SessionSlot::Direct(slot) => {
                 if let Some(session) = slot.lock().await.take() {
-                    session.disconnect().await;
+                    if force {
+                        session.disconnect_forced().await;
+                    } else {
+                        session.disconnect().await;
+                    }
                 }
             }
         }
@@ -127,6 +140,8 @@ pub struct Registry {
     backend: Arc<BackendPool>,
     /// 主机密钥记忆库 (TOFU): 全部隧道共享, 持久化时随 dir 落盘
     known_hosts: Arc<KnownHosts>,
+    /// 同档案共享连接池 (share=true 的隧道按 profile_id 复用连接)
+    pool: Arc<ConnPool>,
 }
 
 /// 按创建顺序取全部 spec (list/落盘共用)
@@ -146,6 +161,7 @@ impl Registry {
             order: Arc::new(Mutex::new(Vec::new())),
             backend: Arc::new(BackendPool::new()),
             known_hosts: KnownHosts::in_memory(),
+            pool: Arc::new(ConnPool::new()),
         }
     }
 
@@ -158,12 +174,18 @@ impl Registry {
             order: Arc::new(Mutex::new(Vec::new())),
             backend: Arc::new(BackendPool::new()),
             known_hosts,
+            pool: Arc::new(ConnPool::new()),
         }
     }
 
     /// 主机密钥记忆库 (TOFU 校验 / UI 列表与清除)
     pub fn known_hosts(&self) -> &Arc<KnownHosts> {
         &self.known_hosts
+    }
+
+    /// 共享连接池快照 (诊断/测试)
+    pub async fn conn_stats(&self) -> Vec<ConnStats> {
+        self.pool.stats().await
     }
 
     /// 应用启动: 从 tunnels.json 恢复隧道列表 (只恢复配置, 不自动启动 ——
@@ -244,6 +266,7 @@ impl Registry {
             state_tx,
             self.backend.clone(),
             known_hosts,
+            self.pool.clone(),
             events,
             on_bound_port,
         ));
@@ -264,7 +287,7 @@ impl Registry {
             (entry.stop.clone(), entry.slot.shallow())
         };
         stop.store(true, Ordering::SeqCst);
-        slot.close_current().await; // 未运行时无会话, 无操作
+        slot.close_current(false).await; // 未运行时无会话, 无操作
         Ok(())
     }
 
@@ -278,6 +301,7 @@ impl Registry {
     }
 
     /// 硬断当前会话但**不**置停止意图——对引擎等价于网络掉线 (触发自动重连)。
+    /// 共享连接的隧道断的是整条池内连接 (同档案成员全部重连, 诚实掉线语义)。
     /// (测试模拟断线; 高级用途: 用户手动强制重连)
     pub async fn drop_connection(&self, id: &str) -> Result<(), String> {
         let slot = {
@@ -285,7 +309,7 @@ impl Registry {
             let entry = entries.get(id).ok_or_else(|| format!("隧道不存在: {id}"))?;
             entry.slot.shallow()
         };
-        slot.close_current().await;
+        slot.close_current(true).await;
         Ok(())
     }
 

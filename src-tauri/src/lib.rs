@@ -20,6 +20,7 @@
 
 use std::sync::Arc;
 
+use proxy_tool_core::engine::pool::{resolve_max_sessions, resolve_share};
 use proxy_tool_core::engine::{Registry, SshCreds};
 use proxy_tool_core::model::{TunnelKind, TunnelSpec, TunnelState};
 use proxy_tool_core::scenarios::Scenario;
@@ -194,21 +195,29 @@ async fn start_by_profile(
         .find(|(s, _)| s.id == id)
         .map(|(s, _)| s)
         .ok_or_else(|| format!("隧道不存在: {id}"))?;
-    let profile = {
+    let (profile, defaults) = {
         let store_guard = state.profile_store.lock().await;
-        store_guard
+        let profile = store_guard
             .profiles
             .iter()
             .find(|p| p.id == spec.profile_id)
             .cloned()
-            .ok_or_else(|| format!("隧道关联的档案不存在 (id: {})", spec.profile_id))?
+            .ok_or_else(|| format!("隧道关联的档案不存在 (id: {})", spec.profile_id))?;
+        (profile, store_guard.defaults.clone())
     };
     let auth = resolve_auth(&profile, password)?;
+    // 共享连接: 档案层覆盖 > 全局默认值 > 引擎默认 (开)
+    let (share, max_sessions) = (
+        resolve_share(Some(&profile), &defaults),
+        resolve_max_sessions(&defaults),
+    );
     let creds = SshCreds {
         host: profile.host,
         port: profile.port,
         username: profile.username,
         auth,
+        share,
+        max_sessions,
     };
     state.registry.start(&id, creds, emitter(app)).await
 }

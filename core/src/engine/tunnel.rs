@@ -28,6 +28,7 @@ use crate::ssh::Logger;
 use crate::tunnel::{self, TunnelEvent};
 use crate::TunnelEvents;
 
+use super::pool::ConnPool;
 use super::{SessionSlot, SshCreds};
 
 /// 第 n 次重连前的等待时长 (n 从 1 起)。
@@ -86,6 +87,7 @@ pub(super) async fn run_task(
     state_tx: watch::Sender<TunnelState>,
     backend: Arc<BackendPool>,
     known_hosts: Arc<KnownHosts>,
+    pool: Arc<ConnPool>,
     events: Arc<dyn TunnelEvents>,
     on_bound_port: Arc<dyn Fn(u16) + Send + Sync>,
 ) {
@@ -143,6 +145,7 @@ pub(super) async fn run_task(
             &on_bound_port,
             &connected_at,
             &known_hosts,
+            &pool,
         )
         .await;
         if let Err(e) = &result {
@@ -192,6 +195,10 @@ pub(super) async fn run_task(
 /// 一次尝试: 建立并运行隧道直到断开 (Ok) 或建连失败 (Err)。
 /// 会话句柄填入共享槽 (注册表据此硬断开), 结束时清槽。
 /// `connected_at`: 进入 Running 时写入 (alive_reset 判据)。
+///
+/// 本地/动态: 经 ConnPool 取租约 (share=true 复用同档案连接, false 游离),
+/// attempt 结束显式 `lease.close()` (共享 = 末位才断连; 游离 = 立即断连)。
+/// 反向: 仍是专用连接路径 (start_tunnel 自建自连), 共享接入在 C3。
 #[allow(clippy::too_many_arguments)]
 async fn attempt(
     spec: &TunnelSpec,
@@ -204,6 +211,7 @@ async fn attempt(
     on_bound_port: &Arc<dyn Fn(u16) + Send + Sync>,
     connected_at: &Arc<Mutex<Option<Instant>>>,
     known_hosts: &Arc<KnownHosts>,
+    pool: &Arc<ConnPool>,
 ) -> Result<(), TunnelError> {
     let id = spec.id.clone();
     let tag = spec.kind.tag();
@@ -265,11 +273,21 @@ async fn attempt(
                 keepalive,
                 known_hosts: known_hosts.clone(),
             };
-            match direct::run_local_forward(cfg, target_host.clone(), *target_port, logger.clone())
-                .await
-            {
+            let lease = pool
+                .acquire(&spec.profile_id, &id, creds, keepalive, known_hosts, logger)
+                .await?;
+            let r = direct::run_local_forward_on(
+                lease.state(),
+                &cfg,
+                target_host.clone(),
+                *target_port,
+                logger.clone(),
+                lease.is_shared(),
+            )
+            .await;
+            match r {
                 Ok((session, task)) => {
-                    run_direct_session(
+                    let out = run_direct_session(
                         slot,
                         session,
                         task,
@@ -279,9 +297,14 @@ async fn attempt(
                         tag,
                         connected_at,
                     )
-                    .await
+                    .await;
+                    lease.close().await;
+                    out
                 }
-                Err(e) => Err(e),
+                Err(e) => {
+                    lease.close().await;
+                    Err(e)
+                }
             }
         }
         TunnelKind::Dynamic { port, bind } => {
@@ -295,9 +318,14 @@ async fn attempt(
                 keepalive,
                 known_hosts: known_hosts.clone(),
             };
-            match direct::run_dynamic_forward(cfg, logger.clone()).await {
+            let lease = pool
+                .acquire(&spec.profile_id, &id, creds, keepalive, known_hosts, logger)
+                .await?;
+            let r = direct::run_dynamic_forward_on(lease.state(), &cfg, logger.clone(), lease.is_shared())
+                .await;
+            match r {
                 Ok((session, task)) => {
-                    run_direct_session(
+                    let out = run_direct_session(
                         slot,
                         session,
                         task,
@@ -307,9 +335,14 @@ async fn attempt(
                         tag,
                         connected_at,
                     )
-                    .await
+                    .await;
+                    lease.close().await;
+                    out
                 }
-                Err(e) => Err(e),
+                Err(e) => {
+                    lease.close().await;
+                    Err(e)
+                }
             }
         }
     }

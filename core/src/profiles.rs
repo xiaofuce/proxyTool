@@ -18,6 +18,9 @@ pub struct ServerProfile {
     /// 私钥文件路径 (None = 密码认证; 密钥口令连接时注入, 同样不落盘)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub identity_file: Option<String>,
+    /// 同档案共享连接的档案级覆盖 (None = 继承全局默认值)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub share_connection: Option<bool>,
 }
 
 /// 档案文件路径: <dir>/profiles.json (目录不存在则创建)

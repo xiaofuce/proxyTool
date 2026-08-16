@@ -190,7 +190,9 @@ impl Drop for ChannelGuard {
     }
 }
 
-/// 建连产物: 连接句柄 + handler 共享状态 (establish 侧注册路由 / 计数用)
+/// 建连产物: 连接句柄 + handler 共享状态 (establish 侧注册路由 / 计数用)。
+/// 字段全 Arc, 浅克隆即共享同一连接的状态。
+#[derive(Clone)]
 pub struct SharedState {
     pub handle: SharedHandle,
     pub corrupted: Arc<AtomicBool>,

@@ -32,6 +32,12 @@ pub struct ProfileDefaults {
     /// 重连策略默认 (隧道 spec 未显式给定时兜底); None = ReconnectPolicy::default
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reconnect: Option<crate::model::ReconnectPolicy>,
+    /// 同档案共享 SSH 连接 (None = 引擎默认开; 见 engine::pool)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub share_connection: Option<bool>,
+    /// MaxSessions 预算 (sshd 会话上限, 计入转发通道; None = 10)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_sessions: Option<u32>,
 }
 
 /// profiles.json v2 结构
@@ -249,6 +255,8 @@ mod tests {
             defaults: ProfileDefaults {
                 connect_timeout_secs: Some(15),
                 reconnect: None,
+                share_connection: None,
+                max_sessions: None,
             },
             profiles: vec![ServerProfile {
                 id: "p1".into(),
@@ -257,6 +265,7 @@ mod tests {
                 port: 22,
                 username: "u".into(),
                 identity_file: Some("C:/keys/id_ed25519".into()),
+                share_connection: None,
             }],
         };
         save_profiles(&dir, &store).unwrap();
@@ -269,6 +278,35 @@ mod tests {
             Some("C:/keys/id_ed25519"),
             "私钥路径应往返无损"
         );
+    }
+
+    /// 共享连接配置往返: 旧文件缺新字段 → None 兼容; 新字段写入后无损恢复
+    #[test]
+    fn profile_defaults_share_roundtrip() {
+        let dir = tempdir();
+        // 旧格式文件 (无 shareConnection/maxSessions 字段) → 读入为 None
+        let old = r#"{"version":2,"defaults":{"connectTimeoutSecs":15},"profiles":[{"id":"p1","name":"n","host":"h","port":22,"username":"u"}]}"#;
+        std::fs::write(profiles_path(&dir).unwrap(), old).unwrap();
+        let store = load_profiles(&dir);
+        assert_eq!(store.defaults.share_connection, None, "旧文件缺省应为 None");
+        assert_eq!(store.defaults.max_sessions, None);
+        assert_eq!(store.profiles[0].share_connection, None);
+
+        // 写入新字段 → 往返无损 (档案层覆盖 + 全局层)
+        let mut store = store;
+        store.defaults.share_connection = Some(false);
+        store.defaults.max_sessions = Some(8);
+        store.profiles[0].share_connection = Some(true);
+        save_profiles(&dir, &store).unwrap();
+        let back = load_profiles(&dir);
+        assert_eq!(back.defaults.share_connection, Some(false));
+        assert_eq!(back.defaults.max_sessions, Some(8));
+        assert_eq!(back.profiles[0].share_connection, Some(true));
+
+        // 落盘文本不包含值为 None 的字段 (skip_serializing_if;
+        // 本用例 reconnect 恒为 None)
+        let text = std::fs::read_to_string(profiles_path(&dir).unwrap()).unwrap();
+        assert!(!text.contains("reconnect"), "None 字段不应落盘: {text}");
     }
 
     /// 文件不存在 → 空 store (不报错)

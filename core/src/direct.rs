@@ -59,13 +59,24 @@ pub struct DirectSession {
 }
 
 impl DirectSession {
-    /// 断开: 停止监听; 专用连接发 SSH DISCONNECT 真正关闭, 共享连接不动
+    /// 断开 (用户停止语义): 停止监听; 专用连接发 SSH DISCONNECT 真正关闭,
+    /// 共享连接不动 (连接生死由租约决定, 可能还有兄弟隧道在用)
     pub async fn disconnect(&self) {
+        self.teardown(false).await;
+    }
+
+    /// 强制断开 (模拟网络掉线): 无论共享与否整连 DISCONNECT ——
+    /// 共享连接的同档案成员各自触发重连
+    pub async fn disconnect_forced(&self) {
+        self.teardown(true).await;
+    }
+
+    async fn teardown(&self, force: bool) {
         self.stop.notify_one();
         if let Some(s) = &self.socks {
             s.stop();
         }
-        if self.shared {
+        if self.shared && !force {
             return;
         }
         let h = self.handle.lock().await;

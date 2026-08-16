@@ -56,6 +56,9 @@ fn creds() -> SshCreds {
         port: c.port,
         username: c.user.clone(),
         auth: AuthMethod::Password(c.pass.clone()),
+        // 默认按产品默认 (共享开) —— 既有引擎用例即覆盖共享路径
+        share: true,
+        max_sessions: 10,
     }
 }
 
@@ -438,6 +441,169 @@ fn listen_port(list: Vec<(TunnelSpec, TunnelState)>, id: &str) -> u16 {
         },
         None => panic!("隧道不存在: {id}"),
     }
+}
+
+/// 连本地端口读 SSH banner (通路验证; 读到即返回, 不等流结束)
+async fn read_banner(port: u16) -> String {
+    let mut conn = tokio::net::TcpStream::connect(("127.0.0.1", port))
+        .await
+        .unwrap_or_else(|e| panic!("连接 127.0.0.1:{port} 失败: {e}"));
+    // sshd 的 banner 是首行写出后等客户端 —— 读到换行即返回
+    let mut buf = vec![0u8; 256];
+    let n = tokio::time::timeout(Duration::from_secs(10), conn.read(&mut buf))
+        .await
+        .expect("读 banner 超时")
+        .expect("读 banner 失败");
+    String::from_utf8_lossy(&buf[..n]).into_owned()
+}
+
+/// 同档案两条 Local 隧道共享一条 SSH 连接: 池 1 条目 / 建连恰 1 次 / 2 租约;
+/// 停一条共享连接不断 (兄弟隧道仍 Running 且通路可用)
+#[tokio::test]
+async fn shared_local_tunnels_one_connection() {
+    let registry = Registry::new();
+    let events: Arc<dyn TunnelEvents> = Arc::new(Collector::default());
+    let mut s1 = local_spec(free_port());
+    s1.profile_id = "p-share".into();
+    let mut s2 = local_spec(free_port());
+    s2.profile_id = "p-share".into();
+    registry.create(s1.clone()).expect("创建失败");
+    registry.create(s2.clone()).expect("创建失败");
+
+    registry
+        .start(&s1.id, creds(), events.clone())
+        .await
+        .expect("启动失败");
+    registry
+        .start(&s2.id, creds(), events.clone())
+        .await
+        .expect("启动失败");
+    wait_state(&registry, &s1.id, |s| matches!(s, TunnelState::Running)).await;
+    wait_state(&registry, &s2.id, |s| matches!(s, TunnelState::Running)).await;
+
+    let stats = registry.conn_stats().await;
+    assert_eq!(stats.len(), 1, "同档案应只有一个池条目: {stats:?}");
+    assert_eq!(stats[0].profile_id, "p-share");
+    assert_eq!(stats[0].connect_count, 1, "两条隧道只建连一次");
+    assert_eq!(stats[0].leases.len(), 2, "两条租约: {stats:?}");
+
+    // 两条隧道各自通路 (都经同一共享连接的 direct_tcpip)
+    let b1 = read_banner(listen_port_of(&s1)).await;
+    let b2 = read_banner(listen_port_of(&s2)).await;
+    assert!(b1.contains("SSH-") && b2.contains("SSH-"), "{b1} / {b2}");
+
+    // 停一条: 只释放本隧道租约, 共享连接保持 (兄弟不受影响)
+    registry.stop(&s1.id).await.expect("停止失败");
+    wait_state(&registry, &s1.id, |s| matches!(s, TunnelState::Stopped)).await;
+    let stats = registry.conn_stats().await;
+    assert_eq!(stats[0].leases.len(), 1, "停一条后只剩一条租约: {stats:?}");
+    assert!(
+        matches!(
+            registry.list().iter().find(|(s, _)| s.id == s2.id),
+            Some((_, TunnelState::Running))
+        ),
+        "兄弟隧道应保持 Running"
+    );
+    let b2 = read_banner(listen_port_of(&s2)).await;
+    assert!(b2.contains("SSH-"), "兄弟隧道通路应仍可用: {b2}");
+
+    registry.stop(&s2.id).await.expect("停止失败");
+    wait_state(&registry, &s2.id, |s| matches!(s, TunnelState::Stopped)).await;
+}
+
+/// 池内整连掉线: 两条成员隧道全部退避重连, single-flight 保证只重建一次
+#[tokio::test]
+async fn shared_pool_drop_reconnects_all() {
+    let registry = Registry::new();
+    let events: Arc<dyn TunnelEvents> = Arc::new(Collector::default());
+    let mut s1 = local_spec(free_port());
+    s1.profile_id = "p-drop".into();
+    let mut s2 = local_spec(free_port());
+    s2.profile_id = "p-drop".into();
+    registry.create(s1.clone()).expect("创建失败");
+    registry.create(s2.clone()).expect("创建失败");
+    registry
+        .start(&s1.id, creds(), events.clone())
+        .await
+        .expect("启动失败");
+    registry
+        .start(&s2.id, creds(), events.clone())
+        .await
+        .expect("启动失败");
+    wait_state(&registry, &s1.id, |s| matches!(s, TunnelState::Running)).await;
+    wait_state(&registry, &s2.id, |s| matches!(s, TunnelState::Running)).await;
+    assert_eq!(registry.conn_stats().await[0].connect_count, 1);
+
+    // 模拟网络掉线: 硬断一条隧道所在的 (共享) 连接 —— 两条全部进退避
+    registry.drop_connection(&s1.id).await.expect("硬断失败");
+    wait_state(&registry, &s1.id, |s| {
+        matches!(s, TunnelState::Backoff { attempt: 1, .. })
+    })
+    .await;
+    wait_state(&registry, &s2.id, |s| {
+        matches!(s, TunnelState::Backoff { attempt: 1, .. })
+    })
+    .await;
+    wait_state(&registry, &s1.id, |s| matches!(s, TunnelState::Running)).await;
+    wait_state(&registry, &s2.id, |s| matches!(s, TunnelState::Running)).await;
+
+    // single-flight: 两条隧道各自重试, 池只重建一次连接
+    let stats = registry.conn_stats().await;
+    assert_eq!(stats.len(), 1);
+    assert_eq!(
+        stats[0].connect_count, 2,
+        "掉线重连全员只多建一次连接: {stats:?}"
+    );
+    assert_eq!(stats[0].leases.len(), 2, "重连后两条租约都回来: {stats:?}");
+
+    // 通路仍可用
+    let b1 = read_banner(listen_port_of(&s1)).await;
+    assert!(b1.contains("SSH-"), "{b1}");
+
+    registry.stop(&s1.id).await.expect("停止失败");
+    registry.stop(&s2.id).await.expect("停止失败");
+    wait_state(&registry, &s1.id, |s| matches!(s, TunnelState::Stopped)).await;
+    wait_state(&registry, &s2.id, |s| matches!(s, TunnelState::Stopped)).await;
+}
+
+/// share=false: 不入池 (stats 空), 各隧道独立连接互不影响
+#[tokio::test]
+async fn dedicated_when_share_off() {
+    let registry = Registry::new();
+    let events: Arc<dyn TunnelEvents> = Arc::new(Collector::default());
+    let mut s1 = local_spec(free_port());
+    s1.profile_id = "p-dedicated".into();
+    let mut s2 = local_spec(free_port());
+    s2.profile_id = "p-dedicated".into();
+    registry.create(s1.clone()).expect("创建失败");
+    registry.create(s2.clone()).expect("创建失败");
+
+    let mut c = creds();
+    c.share = false;
+    registry
+        .start(&s1.id, c.clone(), events.clone())
+        .await
+        .expect("启动失败");
+    registry
+        .start(&s2.id, c, events.clone())
+        .await
+        .expect("启动失败");
+    wait_state(&registry, &s1.id, |s| matches!(s, TunnelState::Running)).await;
+    wait_state(&registry, &s2.id, |s| matches!(s, TunnelState::Running)).await;
+
+    assert!(
+        registry.conn_stats().await.is_empty(),
+        "不共享时池应为空 (游离连接不入表)"
+    );
+
+    // 停一条不影响另一条 (本就是独立连接)
+    registry.stop(&s1.id).await.expect("停止失败");
+    wait_state(&registry, &s1.id, |s| matches!(s, TunnelState::Stopped)).await;
+    let b2 = read_banner(listen_port_of(&s2)).await;
+    assert!(b2.contains("SSH-"), "{b2}");
+
+    registry.stop(&s2.id).await.expect("停止失败");
+    wait_state(&registry, &s2.id, |s| matches!(s, TunnelState::Stopped)).await;
 }
 
 /// 立即重试: 退避等待期间置 retry_now → 跳过剩余等待马上发起新尝试
