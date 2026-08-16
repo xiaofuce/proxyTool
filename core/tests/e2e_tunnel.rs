@@ -763,10 +763,15 @@ async fn shared_conn_data_path() {
         .await
         .expect("启动失败");
 
-    // 等双隧道 Running + 端口回填 (BoundPort → spec)
+    // 等双隧道 Running + 端口回填 (BoundPort → spec)。
+    // 注入服务器 (libonion) 的流程是: std 端口先回填 → 检测注入 → 回退兼容
+    // 模式 → 助手端口二次回填; 端口需等稳定 (1.2s 不变) 再探测, 否则会读到
+    // 即将被回退作废的 std 端口 (其监听已被 cancel → ConnectionRefused)。
     let (p1, p2) = {
+        let mut last = (0u16, 0u16);
+        let mut last_change = std::time::Instant::now();
         let mut got = None;
-        for _ in 0..150 {
+        for _ in 0..400 {
             let list = registry.list();
             let port_of = |id: &str| {
                 list.iter()
@@ -776,13 +781,21 @@ async fn shared_conn_data_path() {
                         _ => None,
                     })
             };
-            if let (Some(a), Some(b)) = (port_of(&s1.id), port_of(&s2.id)) {
-                got = Some((a, b));
+            let cur = (
+                port_of(&s1.id).unwrap_or(0),
+                port_of(&s2.id).unwrap_or(0),
+            );
+            if cur != last {
+                last = cur;
+                last_change = std::time::Instant::now();
+            }
+            if cur.0 != 0 && cur.1 != 0 && last_change.elapsed() >= Duration::from_millis(1200) {
+                got = Some(cur);
                 break;
             }
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
-        got.expect("等待双隧道 Running/端口回填超时")
+        got.expect("等待双隧道 Running/端口回填稳定超时")
     };
     println!("== 双隧道动态端口: {p1} / {p2}");
     assert_ne!(p1, p2, "两条隧道的动态端口应互异");

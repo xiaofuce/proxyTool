@@ -708,10 +708,28 @@ async fn stop_reverse_releases_port() {
         .expect("启动失败");
     wait_state(&registry, &s1.id, |s| matches!(s, TunnelState::Running)).await;
     wait_state(&registry, &s2.id, |s| matches!(s, TunnelState::Running)).await;
-    let (p1, p2) = (
-        reverse_port_of(&registry, &s1.id),
-        reverse_port_of(&registry, &s2.id),
-    );
+    // 注入服务器 std→兼容回退会二次回填端口: 等端口稳定 (1.2s 不变) 再断言监听
+    let (p1, p2) = {
+        let mut last = (0u16, 0u16);
+        let mut last_change = std::time::Instant::now();
+        let mut got = None;
+        for _ in 0..400 {
+            let cur = (
+                reverse_port_of(&registry, &s1.id),
+                reverse_port_of(&registry, &s2.id),
+            );
+            if cur != last {
+                last = cur;
+                last_change = std::time::Instant::now();
+            }
+            if cur.0 != 0 && cur.1 != 0 && last_change.elapsed() >= Duration::from_millis(1200) {
+                got = Some(cur);
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        got.expect("等待双隧道端口回填稳定超时")
+    };
 
     // 双端口都在监听
     assert!(
