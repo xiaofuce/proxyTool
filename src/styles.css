@@ -1,27 +1,98 @@
+/* ===================== 设计 tokens =====================
+ * 表面三档 (bg < surface < surface-2) + 文本三档 + 状态色四件套。
+ * 明暗两套完整色板；切换由 html[data-theme] 驱动 (见 index.html 防闪烁脚本)。 */
 :root {
   font-family: "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
-  color-scheme: light dark;
-  --bg: #f5f6f8;
-  --card: #ffffff;
-  --border: #e2e4e9;
-  --text: #1c1e21;
-  --muted: #6b7280;
+  color-scheme: light;
+
+  /* 表面 */
+  --bg: #f4f5f7;
+  --surface: #ffffff;
+  --surface-2: #eef0f3;
+  --inset: #e9ebef;
+
+  /* 文本 (--muted 对 --surface ≥ 4.5:1) */
+  --text: #1a1d21;
+  --text-2: #444c59;
+  --muted: #5b6472;
+
+  /* 边框 */
+  --border: #e3e5ea;
+  --border-strong: #cdd1d9;
+
+  /* 品牌与状态 */
   --accent: #2563eb;
-  --danger: #dc2626;
+  --accent-hover: #1d4ed8;
+  --on-accent: #ffffff;
+  --success: #1a7f37;
+  --warning: #9a6700;
+  --danger: #cf222e;
+  --info: #0969da;
+
+  /* 交互 */
   --hover: rgba(28, 30, 33, 0.06);
+
+  /* 字号阶梯 */
+  --fs-xs: 11px;
+  --fs-sm: 12px;
+  --fs-md: 13px;
+  --fs-base: 14px;
+  --fs-lg: 16px;
+  --fs-xl: 20px;
+
+  /* 8px 网格间距 */
+  --sp-1: 4px;
+  --sp-2: 8px;
+  --sp-3: 12px;
+  --sp-4: 16px;
+  --sp-5: 24px;
+
+  /* 圆角 */
+  --radius-sm: 6px;
+  --radius-md: 8px;
+  --radius-lg: 12px;
+  --radius-full: 999px;
+
+  /* 海拔 */
+  --shadow-1: 0 1px 2px rgba(16, 24, 40, 0.05), 0 1px 3px rgba(16, 24, 40, 0.06);
+  --shadow-2: 0 4px 12px rgba(16, 24, 40, 0.1), 0 1px 3px rgba(16, 24, 40, 0.08);
+  --shadow-3: 0 12px 32px rgba(16, 24, 40, 0.16);
+
+  /* 焦点环 / z 轴 */
+  --focus: 0 0 0 3px color-mix(in srgb, var(--accent) 30%, transparent);
+  --z-menu: 100;
+  --z-toast: 200;
+  --z-modal: 300;
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --bg: #17181c;
-    --card: #1f2127;
-    --border: #2f323a;
-    --text: #e5e7eb;
-    --muted: #9ca3af;
-    --accent: #3b82f6;
-    --danger: #ef4444;
-    --hover: rgba(229, 231, 235, 0.08);
-  }
+:root[data-theme="dark"] {
+  color-scheme: dark;
+
+  --bg: #0f1013;
+  --surface: #16181d;
+  --surface-2: #1d2026;
+  --inset: #0b0c0f;
+
+  --text: #e6e9ee;
+  --text-2: #b3bac7;
+  --muted: #8b93a3;
+
+  --border: #262a32;
+  --border-strong: #3a4150;
+
+  --accent: #6d8dff;
+  --accent-hover: #8299ff;
+  --on-accent: #0b0d12;
+  --success: #3fb950;
+  --warning: #d29922;
+  --danger: #f85149;
+  --info: #58a6ff;
+
+  --hover: rgba(230, 233, 238, 0.07);
+
+  --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.35);
+  --shadow-2: 0 6px 16px rgba(0, 0, 0, 0.45);
+  --shadow-3: 0 16px 40px rgba(0, 0, 0, 0.55);
 }
 
 * {
@@ -54,7 +125,7 @@ body {
   flex-shrink: 0;
   display: flex;
   flex-direction: column;
-  background: var(--card);
+  background: var(--surface);
   border-right: 1px solid var(--border);
   padding: 14px 10px 10px;
 }
@@ -66,12 +137,12 @@ body {
 }
 
 .brand-name {
-  font-size: 19px;
+  font-size: var(--fs-xl);
   font-weight: 700;
 }
 
 .brand-sub {
-  font-size: 11px;
+  font-size: var(--fs-xs);
   color: var(--muted);
   margin-top: 2px;
 }
@@ -91,10 +162,10 @@ body {
   width: 100%;
   padding: 9px 12px;
   border: none;
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   background: transparent;
   color: var(--text);
-  font-size: 14px;
+  font-size: var(--fs-base);
   text-align: left;
   cursor: pointer;
 }
@@ -105,13 +176,14 @@ body {
 
 .nav-item.active {
   background: var(--accent);
-  color: #fff;
+  color: var(--on-accent);
 }
 
 .nav-icon {
   width: 18px;
-  text-align: center;
-  font-size: 15px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
 }
 
 .nav-dot {
@@ -124,7 +196,7 @@ body {
 }
 
 .nav-dot.connected {
-  background: #16a34a;
+  background: var(--success);
 }
 
 .nav-dot.error {
@@ -132,12 +204,12 @@ body {
 }
 
 .nav-dot.connecting {
-  background: #b45309;
+  background: var(--info);
   animation: pulse 1.2s ease-in-out infinite;
 }
 
 .nav-dot.reconnecting {
-  background: #2563eb;
+  background: var(--warning);
   animation: pulse 1.2s ease-in-out infinite;
 }
 
@@ -148,7 +220,7 @@ body {
 
 .sidebar-foot {
   padding: 10px 12px 4px;
-  font-size: 11px;
+  font-size: var(--fs-xs);
   color: var(--muted);
   border-top: 1px solid var(--border);
 }
@@ -172,33 +244,34 @@ body {
 
 .page-head h2 {
   margin: 0 0 2px;
-  font-size: 22px;
+  font-size: var(--fs-xl);
 }
 
 .page-head p {
   margin: 0 0 18px;
   color: var(--muted);
-  font-size: 12px;
+  font-size: var(--fs-sm);
 }
 
 .page-head code {
-  background: var(--hover);
-  border-radius: 4px;
+  background: var(--surface-2);
+  border-radius: var(--radius-sm);
   padding: 1px 6px;
-  font-size: 11px;
+  font-size: var(--fs-xs);
 }
 
 .card {
-  background: var(--card);
+  background: var(--surface);
   border: 1px solid var(--border);
-  border-radius: 10px;
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-1);
   padding: 16px 18px;
   margin-bottom: 14px;
 }
 
 .card h3 {
   margin: 0 0 12px;
-  font-size: 14px;
+  font-size: var(--fs-base);
 }
 
 .form-grid {
@@ -209,35 +282,41 @@ body {
 
 label span {
   display: block;
-  font-size: 12px;
-  color: var(--muted);
+  font-size: var(--fs-sm);
+  color: var(--text-2);
   margin-bottom: 4px;
 }
 
 input {
   width: 100%;
   padding: 8px 10px;
-  border: 1px solid var(--border);
-  border-radius: 6px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
   background: transparent;
   color: var(--text);
-  font-size: 14px;
+  font-size: var(--fs-base);
 }
 
 select {
   width: 100%;
   padding: 8px 10px;
-  border: 1px solid var(--border);
-  border-radius: 6px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
   background: transparent;
   color: var(--text);
-  font-size: 14px;
+  font-size: var(--fs-base);
 }
 
 input:focus,
 select:focus {
-  outline: 2px solid var(--accent);
-  border-color: transparent;
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: var(--focus);
+}
+
+button:focus-visible {
+  outline: none;
+  box-shadow: var(--focus);
 }
 
 .hidden {
@@ -260,11 +339,11 @@ select:focus {
 /* ---------- 按钮 ---------- */
 button {
   padding: 8px 18px;
-  border: 1px solid var(--border);
-  border-radius: 6px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
   background: transparent;
   color: var(--text);
-  font-size: 13px;
+  font-size: var(--fs-md);
   cursor: pointer;
 }
 
@@ -281,12 +360,13 @@ button:disabled {
 button.primary {
   background: var(--accent);
   border-color: var(--accent);
-  color: #fff;
+  color: var(--on-accent);
 }
 
 button.primary:hover:not(:disabled) {
-  filter: brightness(1.1);
-  color: #fff;
+  background: var(--accent-hover);
+  border-color: var(--accent-hover);
+  color: var(--on-accent);
 }
 
 button.danger:hover:not(:disabled) {
@@ -312,20 +392,20 @@ button.danger:hover:not(:disabled) {
 .badge {
   display: inline-block;
   padding: 5px 14px;
-  border-radius: 999px;
-  font-size: 13px;
+  border-radius: var(--radius-full);
+  font-size: var(--fs-md);
   border: 1px solid var(--border);
   color: var(--muted);
 }
 
 .badge.connecting {
-  color: #b45309;
-  border-color: #b45309;
+  color: var(--info);
+  border-color: var(--info);
 }
 
 .badge.connected {
-  color: #16a34a;
-  border-color: #16a34a;
+  color: var(--success);
+  border-color: var(--success);
 }
 
 .badge.error {
@@ -334,12 +414,12 @@ button.danger:hover:not(:disabled) {
 }
 
 .badge.reconnecting {
-  color: #2563eb;
-  border-color: #2563eb;
+  color: var(--warning);
+  border-color: var(--warning);
 }
 
 .ar-label {
-  font-size: 13px;
+  font-size: var(--fs-md);
   color: var(--muted);
   cursor: pointer;
   user-select: none;
@@ -352,19 +432,24 @@ button.danger:hover:not(:disabled) {
 
 .hint {
   margin-top: 10px;
-  font-size: 12px;
+  font-size: var(--fs-sm);
   color: var(--muted);
   min-height: 16px;
 }
 
+.hint.tight {
+  margin: 4px 0;
+  min-height: 0;
+}
+
 /* ---------- 日志 ---------- */
 .log {
-  background: var(--bg);
+  background: var(--inset);
   border: 1px solid var(--border);
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   padding: 10px 12px;
   font-family: "Cascadia Mono", Consolas, monospace;
-  font-size: 12px;
+  font-size: var(--fs-sm);
   line-height: 1.6;
   max-height: 220px;
   overflow-y: auto;
@@ -395,11 +480,11 @@ button.danger:hover:not(:disabled) {
 }
 
 .profile-info strong {
-  font-size: 14px;
+  font-size: var(--fs-base);
 }
 
 .profile-info span {
-  font-size: 12px;
+  font-size: var(--fs-sm);
   color: var(--muted);
   overflow: hidden;
   text-overflow: ellipsis;
@@ -442,21 +527,21 @@ button.danger:hover:not(:disabled) {
 }
 
 .tunnel-title strong {
-  font-size: 14px;
+  font-size: var(--fs-base);
 }
 
 .tunnel-kind {
-  font-size: 11px;
+  font-size: var(--fs-xs);
   color: var(--accent);
   border: 1px solid var(--accent);
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
   padding: 0 5px;
   line-height: 18px;
 }
 
 .tunnel-sub {
   flex-basis: 100%;
-  font-size: 12px;
+  font-size: var(--fs-sm);
   color: var(--muted);
   overflow: hidden;
   text-overflow: ellipsis;
@@ -471,7 +556,7 @@ button.danger:hover:not(:disabled) {
 
 .tunnel-actions button {
   padding: 6px 12px;
-  font-size: 12px;
+  font-size: var(--fs-sm);
 }
 
 /* 隧道行内「自启」开关 (开机自启 enabled) */
@@ -481,7 +566,7 @@ button.danger:hover:not(:disabled) {
   gap: 4px;
   flex-shrink: 0;
   cursor: pointer;
-  font-size: 12px;
+  font-size: var(--fs-sm);
   color: var(--muted);
   padding: 0 2px;
   user-select: none;
@@ -497,7 +582,7 @@ button.danger:hover:not(:disabled) {
 }
 
 .tunnel-msg-text {
-  font-size: 12px;
+  font-size: var(--fs-sm);
   color: var(--muted);
 }
 
@@ -534,7 +619,7 @@ button.danger:hover:not(:disabled) {
   background: transparent;
   padding: 6px 8px;
   color: var(--muted);
-  font-size: 13px;
+  font-size: var(--fs-md);
 }
 
 .icon-btn:hover:not(:disabled) {
@@ -572,8 +657,9 @@ button.danger:hover:not(:disabled) {
   padding: 12px 14px;
   margin-bottom: 10px;
   border: 1px solid var(--border);
-  border-radius: 10px;
-  background: var(--card);
+  border-radius: var(--radius-lg);
+  background: var(--surface);
+  box-shadow: var(--shadow-1);
   cursor: pointer;
 }
 
@@ -590,18 +676,18 @@ button.danger:hover:not(:disabled) {
   display: flex;
   align-items: center;
   gap: 8px;
-  font-size: 14px;
+  font-size: var(--fs-base);
   font-weight: 600;
   color: var(--text);
 }
 
 .host-block .hb-addr {
-  font-size: 12px;
+  font-size: var(--fs-sm);
   color: var(--muted);
 }
 
 .host-block .hb-count {
-  font-size: 11px;
+  font-size: var(--fs-xs);
   color: var(--muted);
 }
 
@@ -609,14 +695,18 @@ button.danger:hover:not(:disabled) {
   width: 9px;
   height: 9px;
   border-radius: 50%;
-  background: var(--border);
+  background: var(--border-strong);
   flex-shrink: 0;
 }
 
-.hb-status.connected { background: #16a34a; }
+.hb-status.connected { background: var(--success); }
 .hb-status.error { background: var(--danger); }
-.hb-status.connecting, .hb-status.reconnecting {
-  background: #b45309;
+.hb-status.connecting {
+  background: var(--info);
+  animation: pulse 1.2s ease-in-out infinite;
+}
+.hb-status.reconnecting {
+  background: var(--warning);
   animation: pulse 1.2s ease-in-out infinite;
 }
 
@@ -626,13 +716,15 @@ button.danger:hover:not(:disabled) {
   right: 10px;
   bottom: 10px;
   padding: 3px 10px;
-  font-size: 13px;
-  border-radius: 6px;
+  font-size: var(--fs-md);
+  border-radius: var(--radius-sm);
 }
 
 .host-block.new-block {
   border-style: dashed;
+  border-color: var(--border-strong);
   background: transparent;
+  box-shadow: none;
   align-items: center;
   color: var(--muted);
 }
@@ -661,19 +753,19 @@ button.danger:hover:not(:disabled) {
 
 .dp-head h3 {
   margin: 0;
-  font-size: 16px;
+  font-size: var(--fs-lg);
 }
 
 .dp-empty {
   margin-top: 48px;
   text-align: center;
   color: var(--muted);
-  font-size: 14px;
+  font-size: var(--fs-base);
 }
 
 .field-title {
-  font-size: 12px;
-  color: var(--muted);
+  font-size: var(--fs-sm);
+  color: var(--text-2);
   margin: 2px 0;
 }
 
@@ -687,11 +779,11 @@ button.danger:hover:not(:disabled) {
 }
 
 .pd-title strong {
-  font-size: 17px;
+  font-size: var(--fs-lg);
 }
 
 .pd-title span {
-  font-size: 12px;
+  font-size: var(--fs-sm);
   color: var(--muted);
   overflow: hidden;
   text-overflow: ellipsis;
@@ -710,11 +802,11 @@ button.danger:hover:not(:disabled) {
   align-items: center;
   gap: 6px;
   padding: 7px 12px;
-  border: 1px solid var(--border);
-  border-radius: 8px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-md);
   cursor: pointer;
   user-select: none;
-  font-size: 13px;
+  font-size: var(--fs-md);
   color: var(--text);
 }
 
@@ -725,7 +817,7 @@ button.danger:hover:not(:disabled) {
 .seg-item:has(input:checked) {
   border-color: var(--accent);
   color: var(--accent);
-  background: color-mix(in srgb, var(--accent) 8%, transparent);
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
 }
 
 .seg-item input {
@@ -736,7 +828,7 @@ button.danger:hover:not(:disabled) {
 
 .seg-item span {
   margin: 0;
-  font-size: 13px;
+  font-size: var(--fs-md);
 }
 
 /* 指纹卡片 (服务器详情尾) */
@@ -745,9 +837,9 @@ button.danger:hover:not(:disabled) {
   align-items: center;
   gap: 10px;
   padding: 10px 12px;
-  border: 1px dashed var(--border);
-  border-radius: 8px;
-  font-size: 12px;
+  border: 1px dashed var(--border-strong);
+  border-radius: var(--radius-md);
+  font-size: var(--fs-sm);
   color: var(--muted);
   flex-wrap: wrap;
 }
@@ -762,7 +854,7 @@ button.danger:hover:not(:disabled) {
 
 .fp-box code {
   font-family: "Cascadia Mono", Consolas, monospace;
-  font-size: 11px;
+  font-size: var(--fs-xs);
 }
 
 /* ---------- 预设卡片 ---------- */
@@ -785,7 +877,7 @@ button.danger:hover:not(:disabled) {
   text-align: left;
   padding: 14px;
   border: 1px solid var(--border);
-  border-radius: 10px;
+  border-radius: var(--radius-lg);
   background: transparent;
 }
 
@@ -795,19 +887,20 @@ button.danger:hover:not(:disabled) {
 }
 
 .preset-card strong {
-  font-size: 14px;
+  font-size: var(--fs-base);
   color: var(--text);
 }
 
 .preset-card span {
-  font-size: 12px;
-  color: var(--muted);
+  font-size: var(--fs-sm);
+  color: var(--text-2);
   line-height: 1.5;
 }
 
 /* 自定义预设卡: 虚线区分 */
 .preset-card.custom {
   border-style: dashed;
+  border-color: var(--border-strong);
 }
 
 /* 我的场景卡: 右上角 ✕ 删除 */
@@ -816,7 +909,7 @@ button.danger:hover:not(:disabled) {
   top: 6px;
   right: 6px;
   padding: 2px 7px;
-  font-size: 12px;
+  font-size: var(--fs-sm);
   border: none;
   background: transparent;
   color: var(--muted);
@@ -850,13 +943,13 @@ button.danger:hover:not(:disabled) {
 
 .check-label span {
   margin: 0;
-  font-size: 13px;
+  font-size: var(--fs-md);
   color: var(--text);
 }
 
 /* ---------- 卡片小标题 ---------- */
 .card-sub {
-  font-size: 11px;
+  font-size: var(--fs-xs);
   color: var(--muted);
   font-weight: 400;
   margin-left: 6px;

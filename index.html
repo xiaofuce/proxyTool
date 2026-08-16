@@ -2,6 +2,19 @@
 <html lang="zh-CN">
   <head>
     <meta charset="UTF-8" />
+    <script>
+      // 主题防闪烁: 在样式表加载前解析 localStorage 偏好, 设 html[data-theme]
+      (function () {
+        try {
+          var pref = localStorage.getItem("pt-theme") || "system";
+          var dark =
+            pref === "dark" ||
+            (pref === "system" && matchMedia("(prefers-color-scheme: dark)").matches);
+          document.documentElement.dataset.theme = dark ? "dark" : "light";
+          document.documentElement.dataset.themePref = pref;
+        } catch (e) {}
+      })();
+    </script>
     <link rel="stylesheet" href="/src/styles.css" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>proxyTool — SSH 隧道工具</title>
