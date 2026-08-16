@@ -3,7 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <script>
-      // 主题防闪烁: 在样式表加载前解析 localStorage 偏好, 设 html[data-theme]
+      // 外观防闪烁: 在样式表加载前解析 localStorage 偏好 (主题 + 字号), 设 html dataset
       (function () {
         try {
           var pref = localStorage.getItem("pt-theme") || "system";
@@ -12,6 +12,7 @@
             (pref === "system" && matchMedia("(prefers-color-scheme: dark)").matches);
           document.documentElement.dataset.theme = dark ? "dark" : "light";
           document.documentElement.dataset.themePref = pref;
+          document.documentElement.dataset.font = localStorage.getItem("pt-font") || "md";
         } catch (e) {}
       })();
     </script>
@@ -33,19 +34,10 @@
           <button class="nav-item active" data-page="servers">
             <span class="nav-icon"></span><span class="nav-label">服务器</span>
           </button>
-          <button class="nav-item" data-page="tunnels">
-            <span class="nav-icon"></span><span class="nav-label">总览</span>
-            <span class="nav-dot" id="dot-tunnels"></span>
-          </button>
-          <button class="nav-item" data-page="defaults">
-            <span class="nav-icon"></span><span class="nav-label">默认值</span>
+          <button class="nav-item" data-page="settings">
+            <span class="nav-icon"></span><span class="nav-label">设置</span>
           </button>
         </nav>
-        <div class="theme-seg" id="theme-toggle" role="group" aria-label="主题">
-          <button type="button" data-pref="light"></button>
-          <button type="button" data-pref="system"></button>
-          <button type="button" data-pref="dark"></button>
-        </div>
         <div class="sidebar-foot">密码仅存内存 · 不落盘</div>
       </aside>
 
@@ -59,38 +51,36 @@
           <div id="host-grid"></div>
         </section>
 
-        <!-- ========== 右列: 内容区 (总览 / 默认值 / 服务器详情面板) ========== -->
+        <!-- ========== 右列: 内容区 (设置 / 服务器详情面板) ========== -->
         <main class="content">
 
-          <!-- 总览: 全部隧道 -->
-          <section class="page" data-page="tunnels">
+          <!-- 设置: 外观 + 新隧道默认值 + 开机自启 -->
+          <section class="page" data-page="settings">
             <header class="page-head">
-              <h2>总览</h2>
-              <p>全部隧道的状态总账 —— 反向 <code>ssh -R</code> / 本地 <code>ssh -L</code> / 动态 <code>ssh -D</code>，断线自动重连</p>
+              <h2>设置</h2>
+              <p>外观立即生效并记住；默认值仅影响之后新建的隧道</p>
             </header>
-            <div id="ov-stats" class="ov-stats"></div>
-            <div id="ov-filter-row" class="ov-filter-row">
-              <div id="ov-filter" class="ov-filter"></div>
-              <span class="hint tight" id="tunnel-count"></span>
-            </div>
-            <div id="ov-no-match" class="hint tight hidden">没有符合当前筛选的隧道</div>
-            <div id="tunnel-empty" class="card hidden">
-              <div class="hint tight">
-                还没有隧道。到「服务器」页选择服务器，从场景开始 —— 服务器借 VPN 出网、暴露本地服务、访问服务器内网……
-              </div>
-              <div class="actions">
-                <button type="button" id="goto-servers" class="primary">去服务器页</button>
-              </div>
-            </div>
-            <div id="tunnel-list"></div>
-          </section>
 
-          <!-- 默认值: 新隧道继承的重连策略 + 应用开机自启 -->
-          <section class="page" data-page="defaults">
-            <header class="page-head">
-              <h2>默认值</h2>
-              <p>所有服务器共享；仅影响之后新建的隧道，已有隧道的策略不变</p>
-            </header>
+            <div class="card">
+              <h3>外观</h3>
+              <div class="set-row">
+                <div class="set-label">主题</div>
+                <div class="pref-seg" id="set-theme" role="group" aria-label="主题">
+                  <button type="button" data-pref="light"></button>
+                  <button type="button" data-pref="system"></button>
+                  <button type="button" data-pref="dark"></button>
+                </div>
+              </div>
+              <div class="set-row">
+                <div class="set-label">字体大小</div>
+                <div class="pref-seg" id="set-font" role="group" aria-label="字体大小">
+                  <button type="button" data-font="sm">小</button>
+                  <button type="button" data-font="md">标准</button>
+                  <button type="button" data-font="lg">大</button>
+                </div>
+              </div>
+              <div class="hint tight">「跟随系统」主题在系统切换明暗时实时跟随；字号整体缩放界面文字。</div>
+            </div>
 
             <div class="card">
               <h3>新隧道默认值 <span class="card-sub">重连策略在新建隧道时继承</span></h3>

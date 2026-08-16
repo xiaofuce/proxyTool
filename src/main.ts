@@ -1,8 +1,17 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { icon, type IconName } from "./icons";
-import { initTheme } from "./theme";
-import { toast, dialog, withLoading, openMenu, closeMenus, menuTag, type MenuItem } from "./ui";
+import { initAppearance } from "./theme";
+import {
+  toast,
+  toastRich,
+  dialog,
+  withLoading,
+  openMenu,
+  closeMenus,
+  menuTag,
+  type MenuItem,
+} from "./ui";
 
 // ---------- 类型 (与 core serde camelCase 对应) ----------
 interface Profile {
@@ -222,24 +231,14 @@ function selectedProfile(): Profile | undefined {
 const navItems = document.querySelectorAll<HTMLButtonElement>(".nav-item");
 const pages = document.querySelectorAll<HTMLElement>(".page");
 
-function activePage(): string {
-  return document.querySelector<HTMLElement>(".nav-item.active")?.dataset.page ?? "servers";
-}
-
 function showPage(name: string) {
   navItems.forEach((b) => b.classList.toggle("active", b.dataset.page === name));
   pages.forEach((p) => p.classList.toggle("active", p.dataset.page === name));
-  renderCurrentPage();
 }
 
 navItems.forEach((b) => b.addEventListener("click", () => showPage(b.dataset.page!)));
 
-/** 按当前页面渲染隧道列表 (总览 = 全部; 服务器页 = 右面板详情里的该档案隧道) */
-function renderCurrentPage() {
-  if (activePage() === "tunnels") renderOverview();
-}
-
-// ---------- 隧道行渲染 (总览页与服务器详情页共用) ----------
+// ---------- 隧道行渲染 (服务器详情页) ----------
 function summary(t: TunnelDto): string {
   const k = t.kind;
   if ("reverse" in k) {
@@ -257,14 +256,11 @@ function summary(t: TunnelDto): string {
   return `本机 SOCKS5 ${k.dynamic.bind}:${k.dynamic.port} → 服务器代连内网`;
 }
 
-/** 摘要行文案: 总览页 = 服务器名 · summary (跨服务器需定位);
- * 服务器详情页 (上下文已知是谁) = summary · host (host 比别名有增量) */
-function subLine(t: TunnelDto, overview: boolean): string {
+/** 摘要行文案: summary · host (host 比别名有增量) */
+function subLine(t: TunnelDto): string {
   const profile = profiles.find((p) => p.id === t.profileId);
   if (!profile) return `档案缺失 — ${summary(t)}`;
-  return overview
-    ? `${profile.name} · ${summary(t)}`
-    : `${summary(t)} · ${profile.host}`;
+  return `${summary(t)} · ${profile.host}`;
 }
 
 /** vpn_share 形态 (反向 + SOCKS 落地): 显示「验证外网 / 部署 proxy」动作 */
@@ -323,16 +319,6 @@ function noteConnected(t: TunnelDto): void {
   }
 }
 
-function refreshNavDot() {
-  const dot = el<HTMLSpanElement>("dot-tunnels");
-  const states = tunnels.map((t) => t.state);
-  if (states.includes("error")) dot.className = "nav-dot error";
-  else if (states.includes("connecting") || states.includes("reconnecting"))
-    dot.className = "nav-dot connecting";
-  else if (states.includes("connected")) dot.className = "nav-dot connected";
-  else dot.className = "nav-dot";
-}
-
 /** 按当前状态更新一行 (增量, 不重建 DOM; 行不在当前容器则跳过)。
  * 其余动作钮 (重试/信任/验证/部署/场景/删除) 走 ⋯ 菜单, 打开时惰性求值 */
 function updateRow(t: TunnelDto) {
@@ -362,13 +348,11 @@ function updateRow(t: TunnelDto) {
   if (t.state === "connecting" || t.state === "connected") {
     refs.pwBar.classList.add("hidden"); // 已受理, 收起密码条
   }
-  refreshNavDot();
 }
 
-/** 把一批隧道行渲染进容器 (总览页/服务器详情页共用; rowRefs 单容器假设: 同一时刻只显示一页)。
- * U4 行结构: head(展开|名称+形态+端口chip|状态徽章|时长|启动/停止+⋯) + 摘要行 + 消息行 + 详情。
- * overview: 摘要行带服务器名前缀 (总览页跨服务器定位) */
-function renderTunnelRows(container: HTMLElement, list: TunnelDto[], overview = false) {
+/** 把一批隧道行渲染进容器 (服务器详情页; rowRefs 单容器假设: 同一时刻只显示一页)。
+ * U4 行结构: head(展开|名称+形态+端口chip|状态徽章|时长|启动/停止+⋯) + 摘要行 + 消息行 + 详情 */
+function renderTunnelRows(container: HTMLElement, list: TunnelDto[]) {
   closeMenus(); // 行将整表重建, 悬挂的菜单锚点一并收掉
   container.innerHTML = "";
   for (const t of list) {
@@ -421,10 +405,10 @@ function renderTunnelRows(container: HTMLElement, list: TunnelDto[], overview = 
     head.append(expand, title, status, uptime, actions);
     card.append(head);
 
-    // --- 摘要行 (总览: 服务器名 · 参数 / 服务器页: 参数 · host; ellipsis + title 全文) ---
+    // --- 摘要行 (参数 · host; ellipsis + title 全文) ---
     const sub = document.createElement("div");
     sub.className = "tunnel-sub";
-    sub.textContent = subLine(t, overview);
+    sub.textContent = subLine(t);
     sub.title = sub.textContent;
     card.append(sub);
 
@@ -670,7 +654,6 @@ function renderTunnelRows(container: HTMLElement, list: TunnelDto[], overview = 
         connectedSince.delete(t.id);
         pwDrafts.delete(t.id);
         renderHosts();
-        renderCurrentPage();
         if (detailView === "detail") renderServerDetail();
       } catch (err) {
         appendLog(t.id, `❌ ${err}`);
@@ -766,89 +749,10 @@ function renderTunnelRows(container: HTMLElement, list: TunnelDto[], overview = 
       openMenu(moreBtn, menuItems, t.id);
     });
   }
-  refreshNavDot();
 }
 
 function currentTunnel(id: string): TunnelDto | undefined {
   return tunnels.find((t) => t.id === id);
-}
-
-/** 总览筛选 (模块级, 跨重绘保持; 计数恒显全量, 筛选只影响列表) */
-type OvFilter = "all" | "running" | "pending" | "error" | "off";
-let overviewFilter: OvFilter = "all";
-
-const OV_FILTERS: { key: OvFilter; label: string; match: (s: string) => boolean }[] = [
-  { key: "all", label: "全部", match: () => true },
-  { key: "running", label: "运行中", match: (s) => s === "connected" },
-  { key: "pending", label: "进行中", match: (s) => s === "connecting" || s === "reconnecting" },
-  { key: "error", label: "异常", match: (s) => s === "error" },
-  { key: "off", label: "未启动", match: (s) => s === "disconnected" },
-];
-
-/** 统计头: 总数/运行中/进行中/异常 (零值不着色, >0 才亮) */
-function renderOvStats() {
-  const box = el<HTMLDivElement>("ov-stats");
-  const running = tunnels.filter((t) => t.state === "connected").length;
-  const pending = tunnels.filter((t) => t.state === "connecting" || t.state === "reconnecting").length;
-  const errors = tunnels.filter((t) => t.state === "error").length;
-  const stats: [number, string, string][] = [
-    [tunnels.length, "总数", ""],
-    [running, "运行中", running > 0 ? "success" : ""],
-    [pending, "进行中", pending > 0 ? "warning" : ""],
-    [errors, "异常", errors > 0 ? "danger" : ""],
-  ];
-  box.innerHTML = "";
-  for (const [n, label, cls] of stats) {
-    const stat = document.createElement("div");
-    stat.className = "ov-stat" + (cls ? " " + cls : "");
-    const num = document.createElement("strong");
-    num.textContent = String(n);
-    const lab = document.createElement("span");
-    lab.textContent = label;
-    stat.append(num, lab);
-    box.append(stat);
-  }
-}
-
-/** 筛选 chips: 带全量计数, 选中态 = overviewFilter */
-function renderOvFilter() {
-  const box = el<HTMLDivElement>("ov-filter");
-  box.innerHTML = "";
-  for (const f of OV_FILTERS) {
-    const n = f.key === "all" ? tunnels.length : tunnels.filter((t) => f.match(t.state)).length;
-    const chip = document.createElement("button");
-    chip.type = "button";
-    chip.className = "ov-chip" + (overviewFilter === f.key ? " active" : "");
-    const lab = document.createElement("span");
-    lab.textContent = f.label;
-    const cnt = document.createElement("strong");
-    cnt.textContent = String(n);
-    chip.append(lab, cnt);
-    chip.addEventListener("click", () => {
-      overviewFilter = f.key;
-      renderOverview();
-    });
-    box.append(chip);
-  }
-}
-
-/** 总览页: 统计头 + 筛选 + (过滤后) 全部隧道 */
-function renderOverview() {
-  rowRefs.clear();
-  const empty = tunnels.length === 0;
-  el<HTMLDivElement>("tunnel-empty").classList.toggle("hidden", !empty);
-  el<HTMLDivElement>("ov-stats").classList.toggle("hidden", empty);
-  el<HTMLDivElement>("ov-filter-row").classList.toggle("hidden", empty);
-  if (!empty) {
-    renderOvStats();
-    renderOvFilter();
-  }
-  const f = OV_FILTERS.find((x) => x.key === overviewFilter)!;
-  const list = tunnels.filter((t) => f.match(t.state));
-  el<HTMLDivElement>("ov-no-match").classList.toggle("hidden", empty || list.length > 0);
-  el<HTMLSpanElement>("tunnel-count").textContent =
-    overviewFilter === "all" ? `${tunnels.length} 条隧道` : `${list.length} / ${tunnels.length} 条`;
-  renderTunnelRows(el<HTMLDivElement>("tunnel-list"), list, true);
 }
 
 /** 双拉隧道 + 档案 (档案列表曾只 init 拉一次导致陈旧); 托盘常驻场景由 window focus 兜底刷新 */
@@ -860,7 +764,6 @@ async function refreshTunnels() {
   tunnels = ts;
   profiles = ps;
   renderHosts();
-  renderCurrentPage();
   if (detailView === "detail") renderServerDetail();
 }
 
@@ -897,13 +800,6 @@ listen("tunnel-status", (e) => {
       appendLog(p.id, p.state === "error" ? `❌ ${p.message}` : p.message);
     // 块状态点/计数随事件刷新 (总在)
     renderHosts();
-    // 总览页统计头/chips 计数随事件刷新 (轻量重建, 不动行);
-    // 筛选视图下行的归属可能变化 (如 运行中→异常), 整表重渲染保持筛选正确
-    if (activePage() === "tunnels") {
-      renderOvStats();
-      renderOvFilter();
-      if (overviewFilter !== "all") renderOverview();
-    }
     if (p.state === "connected") {
       // 端口 0 动态分配回填会改 spec, 连接成功时拉一次最新列表
       refreshTunnels().catch(() => {});
@@ -911,9 +807,30 @@ listen("tunnel-status", (e) => {
   }
 });
 
+/** TOFU 首连记住指纹 → 可点击复制的 toast (替代裸日志行, 美化提示) */
+function fpRememberedToast(fingerprint: string): void {
+  toastRich({
+    html: `已记住服务器指纹（首次连接）<code>${escapeHtml(fingerprint)}</code>`,
+    kind: "success",
+    icon: "shield-check",
+    ms: 8000,
+    title: "点击复制指纹",
+    onClick: async () => {
+      try {
+        await navigator.clipboard.writeText(fingerprint);
+        toast("指纹已复制", "success");
+      } catch {
+        toast("复制失败", "error");
+      }
+    },
+  });
+}
+
 listen("tunnel-log", (e) => {
   const p = e.payload as { id: string; kind: string; msg: string };
   appendLog(p.id, p.msg);
+  const m = p.msg.match(/已记住服务器指纹 (SHA256:\S+)/);
+  if (m) fpRememberedToast(m[1]);
 });
 
 /** uptime 走字: 30s 只改已显示行的 uptime.textContent, 绝不重绘 */
@@ -1087,7 +1004,7 @@ function renderServerDetail(showPwBar = false) {
   title.className = "pd-title";
   title.innerHTML =
     `<strong>${escapeHtml(p.name)}</strong>` +
-    `<span>${escapeHtml(p.host)}:${p.port} · ${escapeHtml(p.username)} · ${p.identityFile ? "🔑 密钥认证" : "密码认证"}</span>`;
+    `<span>${escapeHtml(p.host)}:${p.port} · ${escapeHtml(p.username)} · ${p.identityFile ? icon("key", 12) + " 密钥认证" : "密码认证"}</span>`;
 
   const btns = document.createElement("div");
   btns.className = "actions";
@@ -1174,25 +1091,57 @@ function renderServerDetail(showPwBar = false) {
   fillFingerprint(p);
 }
 
-/** 服务器详情尾: 指纹卡片 (TOFU 记忆, 异步填充) */
+// ---------- 服务器详情尾: 指纹卡片 (TOFU 记忆) ----------
+
+/** 上次渲染的指纹内容键 (host:port:fingerprint)。
+ * refreshTunnels 每次连接成功都会重进详情, 内容没变就跳过重渲染 (防闪烁/防 hover 态被打断) */
+let lastFpKey = "";
+
 async function fillFingerprint(p: Profile) {
   const box = el<HTMLDivElement>("pd-fingerprint");
+  const key = (fp: string | null) => `${p.host}:${p.port}:${fp ?? "-"}`;
   try {
     const list = await invoke<Array<{ host: string; port: number; algorithm: string; fingerprint: string }>>(
       "known_hosts_list"
     );
     const hit = list.find((h) => h.host === p.host && h.port === p.port);
+    if (key(hit?.fingerprint ?? null) === lastFpKey) return;
+    lastFpKey = key(hit?.fingerprint ?? null);
+    box.innerHTML = "";
     if (!hit) {
-      box.innerHTML =
-        '<span class="fp-text">指纹: 首次连接后自动记住 (TOFU); 变更即拒绝连接</span>';
+      const none = document.createElement("div");
+      none.className = "fp-none";
+      none.textContent = "指纹: 首次连接后自动记住 (TOFU); 变更即拒绝连接";
+      box.append(none);
       return;
     }
-    box.innerHTML = `<span class="fp-text">指纹已记住 (${escapeHtml(hit.algorithm)}) <code>${escapeHtml(hit.fingerprint)}</code></span>`;
-    const btn = document.createElement("button");
-    btn.type = "button";
-    btn.textContent = "清除";
-    btn.className = "danger";
-    btn.addEventListener("click", async () => {
+    const row = document.createElement("div");
+    row.className = "fp-row";
+    row.innerHTML =
+      `<span class="fp-ic">${icon("shield-check", 16)}</span>` +
+      `<div class="fp-main"><div class="fp-head">已记住服务器指纹<span class="fp-algo"></span></div>` +
+      `<code class="fp-code">${escapeHtml(hit.fingerprint)}</code></div>`;
+    row.querySelector(".fp-algo")!.textContent = hit.algorithm;
+
+    const actions = document.createElement("div");
+    actions.className = "fp-actions";
+    const copyBtn = document.createElement("button");
+    copyBtn.type = "button";
+    copyBtn.title = "复制指纹";
+    copyBtn.innerHTML = `${icon("copy", 12)}<span class="btn-label">复制</span>`;
+    copyBtn.addEventListener("click", async () => {
+      try {
+        await navigator.clipboard.writeText(hit.fingerprint);
+        toast("指纹已复制", "success");
+      } catch {
+        toast("复制失败", "error");
+      }
+    });
+    const clearBtn = document.createElement("button");
+    clearBtn.type = "button";
+    clearBtn.className = "danger";
+    clearBtn.textContent = "清除";
+    clearBtn.addEventListener("click", async () => {
       const ok = await dialog({
         title: `清除 ${p.host}:${p.port} 的指纹记录?`,
         body: "下次连接将重新记住当前指纹 (仅服务器确已变更时操作)。",
@@ -1202,12 +1151,15 @@ async function fillFingerprint(p: Profile) {
       if (!ok) return;
       try {
         await invoke("known_hosts_forget", { host: p.host, port: p.port });
+        lastFpKey = ""; // 强制重渲染 (清后回到占位态)
         fillFingerprint(p);
       } catch (err) {
         toast(`清除失败: ${err}`, "error");
       }
     });
-    box.append(btn);
+    actions.append(copyBtn, clearBtn);
+    row.append(actions);
+    box.append(row);
   } catch (err) {
     box.textContent = `指纹信息读取失败: ${err}`;
   }
@@ -1253,7 +1205,6 @@ el<HTMLFormElement>("server-form").addEventListener("submit", async (e) => {
           profile: { id, name, host, port, username, identityFile: keyPath || null, shareConnection },
         });
         selectProfile(id); // 保存后选中并进入详情
-        renderCurrentPage(); // 已有隧道摘要里的档案名同步
       } catch (err) {
         toast(`保存失败: ${err}`, "error");
       }
@@ -1363,7 +1314,6 @@ async function openScenarioPick() {
 
 el<HTMLButtonElement>("pd-new-tunnel").addEventListener("click", openScenarioPick);
 el<HTMLButtonElement>("sp-back").addEventListener("click", () => setDetailView("detail"));
-el<HTMLButtonElement>("goto-servers").addEventListener("click", () => showPage("servers"));
 
 const WZ_HINTS: Record<string, string> = {
   vpn_share: "服务器经本机 VPN 出外网: 服务器上用 socks5h://127.0.0.1:<端口>",
@@ -1764,8 +1714,7 @@ async function loadAutostart() {
 function applyStaticIcons() {
   const NAV_ICONS: Record<string, IconName> = {
     servers: "server",
-    tunnels: "arrow-right-left",
-    defaults: "settings",
+    settings: "settings",
   };
   for (const b of document.querySelectorAll<HTMLElement>(".nav-item")) {
     const slot = b.querySelector(".nav-icon");
@@ -1782,14 +1731,10 @@ function applyStaticIcons() {
     "afterbegin",
     `<div class="empty-ic">${icon("server", 28)}</div>`,
   );
-  el("tunnel-empty").insertAdjacentHTML(
-    "afterbegin",
-    `<div class="empty-ic">${icon("waypoints", 28)}</div>`,
-  );
 }
 
 applyStaticIcons();
-initTheme();
+initAppearance();
 (async () => {
   profiles = await invoke<Profile[]>("list_profiles");
   tunnels = await invoke<TunnelDto[]>("tunnels_list");

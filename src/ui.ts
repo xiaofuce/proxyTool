@@ -14,8 +14,11 @@ const TOAST_ICONS: Record<ToastKind, IconName> = {
 
 let toastStack: HTMLDivElement | null = null;
 
-/** kind=error 默认 5s (错误信息需要阅读时间), 其余 3s */
-export function toast(msg: string, kind: ToastKind = "info", ms?: number): void {
+/** 底层挂载 (栈管理/上限/定时淡出); toast 与 toastRich 共用 */
+function mountToast(kind: ToastKind, ic: IconName, ms: number, onClick?: () => void): {
+  item: HTMLDivElement;
+  msg: HTMLSpanElement;
+} {
   if (!toastStack || !toastStack.isConnected) {
     toastStack = document.createElement("div");
     toastStack.className = "toast-stack";
@@ -24,16 +27,47 @@ export function toast(msg: string, kind: ToastKind = "info", ms?: number): void 
   const item = document.createElement("div");
   item.className = `toast ${kind}`;
   item.setAttribute("role", kind === "error" ? "alert" : "status");
-  item.innerHTML = `${icon(TOAST_ICONS[kind], 15)}<span class="toast-msg"></span>`;
-  const text = item.querySelector(".toast-msg")!;
-  text.textContent = msg;
+  item.innerHTML = `${icon(ic, 15)}<span class="toast-msg"></span>`;
+  if (onClick) {
+    item.classList.add("clickable");
+    item.addEventListener("click", onClick);
+  }
   toastStack.append(item);
   while (toastStack.children.length > 4) toastStack.firstElementChild!.remove();
-  const life = ms ?? (kind === "error" ? 5000 : 3000);
   setTimeout(() => {
     item.classList.add("out");
     setTimeout(() => item.remove(), 200);
-  }, life);
+  }, ms);
+  return { item, msg: item.querySelector(".toast-msg")! };
+}
+
+/** kind=error 默认 5s (错误信息需要阅读时间), 其余 3s */
+export function toast(msg: string, kind: ToastKind = "info", ms?: number): void {
+  mountToast(kind, TOAST_ICONS[kind], ms ?? (kind === "error" ? 5000 : 3000)).msg.textContent =
+    msg;
+}
+
+/** 富 toast: html 内容 + 自定义图标 + 点击回调 (如指纹点击复制) */
+export interface RichToastOptions {
+  /** 受信 html (调用方自行转义动态片段) */
+  html: string;
+  kind?: ToastKind;
+  icon?: IconName;
+  ms?: number;
+  onClick?: () => void;
+  title?: string;
+}
+
+export function toastRich(o: RichToastOptions): void {
+  const kind = o.kind ?? "info";
+  const { item, msg } = mountToast(
+    kind,
+    o.icon ?? TOAST_ICONS[kind],
+    o.ms ?? (kind === "error" ? 5000 : 3000),
+    o.onClick
+  );
+  if (o.title) item.title = o.title;
+  msg.innerHTML = o.html;
 }
 
 // ---------- dialog: 替代 confirm / prompt ----------

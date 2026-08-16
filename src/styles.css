@@ -103,7 +103,30 @@ body {
   margin: 0;
   background: var(--bg);
   color: var(--text);
-  min-width: 940px;
+  overflow: hidden; /* 窗口即视口, 滚动只在列内 (hosts-col / content / log) */
+}
+
+/* 细滚动条 (WebView2 = Chromium): 弱化存在感, 不再顶出系统粗条 */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--border-strong);
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--muted);
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-corner {
+  background: transparent;
 }
 
 /* ===================== 整体布局: 侧边栏 + (服务器列 + 内容区) ===================== */
@@ -186,31 +209,53 @@ body {
   justify-content: center;
 }
 
-.nav-dot {
-  margin-left: auto;
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
+/* 偏好分段控件 (设置页: 主题 / 字体大小) */
+.pref-seg {
+  display: inline-flex;
+  gap: 2px;
+  padding: 3px;
+  background: var(--inset);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+}
+
+.pref-seg button {
+  height: 28px;
+  padding: 0 12px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  border: none;
   background: transparent;
-  flex-shrink: 0;
+  color: var(--muted);
+  border-radius: var(--radius-sm);
+  font-size: var(--fs-sm);
 }
 
-.nav-dot.connected {
-  background: var(--success);
+.pref-seg button:hover:not(.active) {
+  background: var(--hover);
+  border-color: transparent;
 }
 
-.nav-dot.error {
-  background: var(--danger);
+.pref-seg button.active {
+  background: var(--surface);
+  color: var(--accent);
+  box-shadow: var(--shadow-1);
 }
 
-.nav-dot.connecting {
-  background: var(--info);
-  animation: pulse 1.2s ease-in-out infinite;
+/* 设置行: 左标签 + 右控件 */
+.set-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 7px 0;
 }
 
-.nav-dot.reconnecting {
-  background: var(--warning);
-  animation: pulse 1.2s ease-in-out infinite;
+.set-label {
+  font-size: var(--fs-md);
+  color: var(--text);
 }
 
 @keyframes pulse {
@@ -225,39 +270,23 @@ body {
   border-top: 1px solid var(--border);
 }
 
-/* 主题三态分段控件 (浅色/跟随系统/深色) */
-.theme-seg {
-  display: flex;
-  gap: 2px;
-  padding: 3px;
-  margin-bottom: 10px;
-  background: var(--inset);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-md);
+/* 字号三档 (设置页): 整体换档 --fs-* tokens, 全 UI 即时缩放; md = 默认 */
+:root[data-font="sm"] {
+  --fs-xs: 10px;
+  --fs-sm: 11px;
+  --fs-md: 12px;
+  --fs-base: 13px;
+  --fs-lg: 15px;
+  --fs-xl: 18px;
 }
 
-.theme-seg button {
-  flex: 1;
-  height: 26px;
-  padding: 0;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  border: none;
-  background: transparent;
-  color: var(--muted);
-  border-radius: var(--radius-sm);
-}
-
-.theme-seg button:hover:not(.active):not(:disabled) {
-  background: var(--hover);
-  border-color: transparent;
-}
-
-.theme-seg button.active {
-  background: var(--surface);
-  color: var(--accent);
-  box-shadow: var(--shadow-1);
+:root[data-font="lg"] {
+  --fs-xs: 12px;
+  --fs-sm: 13px;
+  --fs-md: 14px;
+  --fs-base: 15px;
+  --fs-lg: 17px;
+  --fs-xl: 22px;
 }
 
 /* ---------- 内容区 ---------- */
@@ -1002,30 +1031,74 @@ button.danger:hover:not(:disabled) {
   font-size: var(--fs-md);
 }
 
-/* 指纹卡片 (服务器详情尾) */
-.fp-box {
+/* 指纹卡片 (服务器详情尾): 记住态 = 成功色软底行 / 未记住 = 虚线占位 */
+.fp-row {
   display: flex;
   align-items: center;
   gap: 10px;
+  flex-wrap: wrap;
+  padding: 10px 12px;
+  border: 1px solid color-mix(in srgb, var(--success) 30%, var(--border));
+  border-radius: var(--radius-md);
+  background: color-mix(in srgb, var(--success) 5%, transparent);
+}
+
+.fp-ic {
+  color: var(--success);
+  display: inline-flex;
+  flex-shrink: 0;
+}
+
+.fp-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.fp-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: var(--fs-sm);
+  color: var(--text);
+}
+
+.fp-algo {
+  font-size: var(--fs-xs);
+  line-height: 16px;
+  padding: 0 6px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  color: var(--muted);
+}
+
+.fp-code {
+  font-family: "Cascadia Mono", Consolas, monospace;
+  font-size: var(--fs-xs);
+  color: var(--text-2);
+  word-break: break-all;
+}
+
+.fp-actions {
+  display: flex;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.fp-actions button {
+  padding: 4px 10px;
+  font-size: var(--fs-xs);
+}
+
+.fp-none {
   padding: 10px 12px;
   border: 1px dashed var(--border-strong);
   border-radius: var(--radius-md);
   font-size: var(--fs-sm);
   color: var(--muted);
-  flex-wrap: wrap;
-}
-
-.fp-box .fp-text {
-  flex: 1;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.fp-box code {
-  font-family: "Cascadia Mono", Consolas, monospace;
-  font-size: var(--fs-xs);
 }
 
 /* ---------- 预设卡片 ---------- */
@@ -1161,6 +1234,28 @@ button.danger:hover:not(:disabled) {
 
 .toast .ic {
   margin-top: 1px;
+}
+
+.toast .toast-msg {
+  min-width: 0;
+}
+
+/* 富 toast: 可点击 (如指纹点击复制) + code 片段 */
+.toast.clickable {
+  cursor: pointer;
+}
+
+.toast code {
+  display: inline-block;
+  margin-top: 3px;
+  padding: 1px 6px;
+  border-radius: var(--radius-sm);
+  background: var(--inset);
+  border: 1px solid var(--border);
+  font-family: "Cascadia Mono", Consolas, monospace;
+  font-size: var(--fs-xs);
+  word-break: break-all;
+  color: var(--text-2);
 }
 
 .toast.info .ic { color: var(--info); }
@@ -1358,101 +1453,9 @@ button.danger-primary:hover:not(:disabled) {
   padding: 6px 8px;
 }
 
-/* ===================== U5: 总览统计头 + 筛选 + 表单散值归位 ===================== */
-
-/* 统计头: 4 格 (总数/运行中/进行中/异常), 零值中性 / >0 亮色 */
-.ov-stats {
-  display: flex;
-  gap: 10px;
-  margin-bottom: 12px;
-}
-
-.ov-stat {
-  flex: 1;
-  display: flex;
-  align-items: baseline;
-  gap: 8px;
-  padding: 10px 14px;
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-md);
-  box-shadow: var(--shadow-1);
-}
-
-.ov-stat strong {
-  font-size: var(--fs-xl);
-  line-height: 1;
-  font-variant-numeric: tabular-nums;
-}
-
-.ov-stat span {
-  font-size: var(--fs-sm);
-  color: var(--muted);
-}
-
-.ov-stat.success strong { color: var(--success); }
-.ov-stat.warning strong { color: var(--warning); }
-.ov-stat.danger strong { color: var(--danger); }
-
-/* 筛选行: chips + 计数说明 (右) */
-.ov-filter-row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 10px;
-  margin-bottom: 14px;
-}
-
-.ov-filter {
-  display: flex;
-  gap: 6px;
-  flex-wrap: wrap;
-}
-
-.ov-chip {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  padding: 4px 12px;
-  border: 1px solid var(--border-strong);
-  border-radius: var(--radius-full);
-  background: transparent;
-  color: var(--text-2);
-  font-size: var(--fs-sm);
-}
-
-.ov-chip strong {
-  font-size: var(--fs-xs);
-  font-variant-numeric: tabular-nums;
-  color: var(--muted);
-}
-
-.ov-chip:hover:not(.active) {
-  border-color: var(--accent);
-  color: var(--accent);
-}
-
-.ov-chip.active {
-  border-color: var(--accent);
-  color: var(--accent);
-  background: color-mix(in srgb, var(--accent) 10%, transparent);
-}
-
-.ov-chip.active strong {
-  color: var(--accent);
-}
+/* ===================== 设置页 + 表单散值归位 ===================== */
 
 /* 表单错误提示 (隧道表单尾) */
 #wz-error {
   color: var(--danger);
-}
-
-/* 空态卡片内的动作行 */
-#tunnel-empty {
-  text-align: center;
-}
-
-#tunnel-empty .actions {
-  margin-top: 10px;
-  justify-content: center;
 }
